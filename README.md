@@ -82,151 +82,255 @@
 
 ---
 
-## 后端推理接口
+## 推理接口
 
-本仓库不含 Flask 服务入口（`app.py`），调用方通过 Python 直接实例化后端类进行推理。
+本仓库不含 Flask 服务入口（`app.py`）和前端页面，提供两个**交互式命令行脚本**作为推理接口，便于快速验证模型效果。
 
-### 1. 胜负预测 — PredictBackend
+### 1. 胜负预测 — predict_match.py
 
-**接口文件**：[bp_prediction/predict_backend.py](bp_prediction/predict_backend.py)
+**接口文件**：[bp_prediction/predict_match.py](bp_prediction/predict_match.py)
 
-**使用方法**：
+**启动命令**：
 
-```python
-from logger_config import setup_logging
-from bp_prediction.predict_backend import PredictBackend
-
-# 初始化
-backend = PredictBackend()
-backend.load()  # 加载模型 (耗时操作, 启动时调用一次)
-
-# 构建请求
-request = {
-    "league": "LPL",              # 联赛
-    "is_playoff": False,           # 是否季后赛
-    "first_pick": "red",           # 首选方位于地图哪侧: "blue" 或 "red"
-    "blue_team": "BLG",            # 首选方战队
-    "red_team": "T1",             # 次选方战队
-    "blue_champions": {            # 首选方阵容 (位置 -> 英雄名)
-        "top": "Ornn",
-        "jng": "Vi",
-        "mid": "Azir",
-        "bot": "Jinx",
-        "sup": "Lulu",
-    },
-    "red_champions": {
-        "top": "Gnar",
-        "jng": "Sejuani",
-        "mid": "Sylas",
-        "bot": "Aphelios",
-        "sup": "Thresh",
-    },
-    "blue_players": {              # 首选方选手 (可填 "unknown", 每队最多 2 名)
-        "top": "Bin",
-        "jng": "Xun",
-        "mid": "Knight",
-        "bot": "Viper",
-        "sup": "ON",
-    },
-    "red_players": {
-        "top": "Doran",
-        "jng": "Oner",
-        "mid": "Faker",
-        "bot": "Peyz",
-        "sup": "Keria",
-    },
-}
-
-# 推理
-result = backend.predict(request)
-print(result)
-# {
-#     "blue_prob": 0.6234,        # 首选方 (BP 蓝方) 胜率
-#     "fold_details": [...],      # 各折预测明细
-#     "feature_importance": [...], # SHAP 特征重要性
-#     ...
-# }
+```bash
+cd lol_public
+python -m bp_prediction.predict_match --mode production
+# --mode production : 加载生产模型 (默认)
+# --mode training   : 加载 OOT 5-Fold 模型
 ```
 
-**关键方法**：
+**交互流程**（启动后逐步 `input()`，支持循环预测多局）：
 
-| 方法 | 说明 |
-|------|------|
-| `PredictBackend()` | 实例化，配置并发控制、限流、兜底机制 |
-| `.load()` | 加载模型和数据（耗时，启动时调用一次） |
-| `.predict(request)` | 胜率预测，返回首选方胜率 + SHAP 可解释性 |
+```
+$ python -m bp_prediction.predict_match --mode production
 
-**内置机制**：
-- 限流：滑动窗口控制（默认 60 秒内最多 N 次请求）
-- 超时：独立线程池执行推理，超时自动中断
-- 并发安全：Per-seed 推理锁（CatBoost predict_proba 非线程安全）
-- 兜底：联赛置信度不足时回退规则引擎
-- 缓存：Pre-Draft 结果缓存（BP 探索阶段减少重复计算）
+  BP 胜负预测模型 - 单局验证测试
+  运行模式: PRODUCTION
+  模型: CatBoost-7Seed-Bagging
 
-### 2. BP 推荐 — BPRecommendationBackend
+  --- 预测模式 ---
+  1) 纯 Draft 模式: 仅输入阵容, 无战队/选手信息
+  2) 完整模式: 输入战队+阵容+选手 (选手可填 unknown, 每队最多2名)
+  选择模式 (1/2): 2
 
-**接口文件**：[bp_recommendation/bp_recommendation_backend.py](bp_recommendation/bp_recommendation_backend.py)
+  --- 基本信息 ---
+  联赛 (LPL/LCK/LEC): LPL
+  是否季后赛? (y/n): n
+  蓝方是否为先选方? (y/n): y
 
-**使用方法**：
+  --- 阵容选择 ---
+  位置顺序: 上单 → 打野 → 中单 → ADC → 辅助
 
-```python
-from logger_config import setup_logging
-from bp_recommendation.bp_recommendation_backend import BPRecommendationBackend
+  [蓝方阵容]
+    上单: Ornn
+    打野: Vi
+    中单: Azir
+    ADC:  Jinx
+    辅助: Lulu
 
-# 初始化
-backend = BPRecommendationBackend()
-backend.load()  # 加载模型 (耗时操作, 启动时调用一次)
+  [红方阵容]
+    上单: Gnar
+    打野: Sejuani
+    中单: Sylas
+    ADC:  Aphelios
+    辅助: Thresh
 
-# 构建 payload
-payload = {
-    "league": "LPL",               # 联赛
-    "blue_team": "BLG",             # 首选方战队
-    "red_team": "T1",              # 次选方战队
-    "playoffs": False,              # 是否季后赛
-    "first_pick_map_side": 1.0,     # 首选方地图选边: 1.0=蓝色方, 0.0=红色方
-    "game_num": 1,                  # 全局bp局次 (1-5)
-    "completed_steps": 0,           # 已完成的 BP 步数 (0=第一步)
-    "bp_seq_ids": [],               # 已选英雄 ID 序列 (按 BP_SEQUENCE 顺序)
-    "unavail_set": [],              # 不可用英雄 ID 集合
-    "pre_unavail_list": [],         # 前置局已用英雄 (Fearless Draft)
-    "blue_pids": ["", "", "", "", ""],  # 首选方选手 ID (5个, 可空)
-    "red_pids": ["", "", "", "", ""],   # 次选方选手 ID
-}
+  --- 队伍信息 ---
+  蓝方队伍名称: BLG
+  红方队伍名称: T1
 
-# 推理
-result = backend.recommend(payload)
-print(result)
-# {
-#     "recommendations": [          # 推荐英雄列表 (Top-N)
-#         {"champion": "Vi", "score": 0.92, ...},
-#         ...
-#     ],
-#     "request_id": "a1b2c3d4e5f6",
-#     ...
-# }
+  --- 选手信息 ---
+  输入选手ID获取历史特征; 输入 unknown 标记未知选手 (每队最多2名)
+
+  [BLG (蓝方) 选手]
+    上单 (Ornn) 选手ID: Bin
+    打野 (Vi) 选手ID: Xun
+    中单 (Azir) 选手ID: Knight
+    ADC (Jinx) 选手ID: Elk
+    辅助 (Lulu) 选手ID: ON
+
+  [T1 (红方) 选手]
+    上单 (Gnar) 选手ID: Zeus
+    打野 (Sejuani) 选手ID: Oner
+    中单 (Sylas) 选手ID: Faker
+    ADC (Aphelios) 选手ID: Gumayusi
+    辅助 (Thresh) 选手ID: Keria
+
+  构建特征向量...
+  模式: 完整 | 特征维度: 352
+  进行预测...
+
+  (输出预测结果, 见下方)
+
+  是否预测下一局? (y/n): n
 ```
 
-**关键方法**：
+**输出示例**：
 
-| 方法 | 说明 |
+```
+======================================================================
+  预测结果
+======================================================================
+
+  BLG (蓝方) 胜率: 62.3%
+  T1  (红方) 胜率: 37.7%
+
+  >>> 预测胜方: BLG (置信度: 24.6%)
+
+  各模型预测详情:
+    Production: 0.623 (seeds: [0.631, 0.618, 0.625, ...])
+
+======================================================================
+  特征权重分析 (Top 20)
+======================================================================
+  排名 特征名                                          权重%      当前值
+  ─────────────────────────────────────────────────────────────────────
+     1 blue_pick_power_diff                             8.42%     0.3210
+     2 red_ban_target_value                             6.15%    -0.1540
+     ...
+
+======================================================================
+  阵容对比分析
+======================================================================
+  位置   蓝方             红方             蓝方强度  红方强度    差值
+  ───────────────────────────────────────────────────────────────────
+  上单   Ornn             Gnar                  12        10      +2
+  ...
+```
+
+**核心函数**：
+
+| 函数 | 说明 |
 |------|------|
-| `BPRecommendationBackend()` | 实例化，配置并发控制、限流 |
-| `.load()` | 加载 Transformer + LightGBM 模型、特征存储、兜底管理器 |
-| `.recommend(payload)` | 无状态推理，输出当前 BP 步骤的 Pick/Ban 推荐 |
+| `load_models()` | 加载 CatBoost 集成模型 (生产 / OOT 折) |
+| `build_single_match_features()` | 从 `feature_builder.py` 构建 350+ 维特征向量 |
+| `predict_with_models()` | 7 seed × N fold 集成预测, 输出胜率 + 特征重要性 |
 
-**内置机制**：
-- 无状态：所有 BP 进度上下文从 payload 获取，便于水平扩展
-- 限流 + 超时 + 资源隔离（同 PredictBackend）
-- 兜底：FallbackManager 在模型异常时自动降级为规则引擎
+### 2. BP 推荐 — bp_predict.py
 
-### 交互式测试脚本
+**接口文件**：[bp_recommendation/bp_predict.py](bp_recommendation/bp_predict.py)
 
-除后端类外，还提供两个交互式命令行脚本，便于快速验证：
+**启动命令**：
 
-| 脚本 | 说明 |
+```bash
+cd lol_public
+python -m bp_recommendation.bp_predict
+```
+
+**交互流程**（启动后逐步 `input()`，共 20 步 BP 流程）：
+
+```
+$ python -m bp_recommendation.bp_predict
+
+  LOL BP 实时推荐系统
+  输入英雄英文名/中文名/Riot ID 进行 Ban/Pick
+
+--- 选择模式 ---
+  1) 纯 Draft 模式 (不输入战队/选手信息)
+  2) 完整模式 (输入双方战队 + 选手信息)
+  请选择 (1/2): 2
+
+--- 赛前信息 ---
+  联赛 (LPL/LCK/LEC), 默认LPL: LPL
+  是否季后赛 (y/n, 默认n): n
+  先选方 (blue/red, 默认blue): blue
+
+--- 战队信息 ---
+  蓝方队伍名: BLG
+  红方队伍名: T1
+
+--- 选手信息 ---
+  输入选手 ID，未知选手请输入 'unknown'
+  每队最多允许 2 名 unknown 选手
+
+  蓝方 (BLG) 已知选手: Bin, Xun, Knight, Elk, ON, ...
+  蓝方 top: Bin
+  蓝方 jng: Xun
+  蓝方 mid: Knight
+  蓝方 bot: Elk
+  蓝方 sup: ON
+
+  红方 (T1) 已知选手: Zeus, Oner, Faker, Gumayusi, Keria, ...
+  红方 top: Zeus
+  红方 jng: Oner
+  红方 mid: Faker
+  红方 bot: Gumayusi
+  红方 sup: Keria
+
+--- 开始 BP (完整模式) ---
+  每步输入英雄名称后回车，输入 'q' 退出，输入 'skip' 跳过当前步
+  输入 'undo' 撤销上一步
+
+  >>> 第 1/20 步: 蓝方 Ban1
+
+  Top-20 Ban 推荐:
+  Rank  Champion            Score
+  ----  --------            -----
+     1  Xayah              0.8421 <<<
+     2  Aphelios           0.7893 <<<
+     3  Caitlyn            0.7654 <<<
+     ...
+
+  输入 蓝方Ban1 的英雄 (或 q/undo): Xayah
+  已选择: Xayah
+
+  >>> 第 2/20 步: 红方 Ban1
+  (模型输出红方 Ban 推荐 Top-20, 用户输入...)
+  ...
+```
+
+**输出示例**（每一步的推荐）：
+
+```
+  第 1/20 步: 蓝方 Ban1
+
+  Top-20 Ban 推荐:
+  Rank  Champion            Score
+  ----  --------            -----
+     1  Xayah              0.8421 <<<
+     2  Aphelios           0.7893 <<<
+     3  Caitlyn            0.7654 <<<
+     4  Lucian             0.7102
+     ...
+
+  输入 蓝方Ban1 的英雄 (或 q/undo): Xayah
+```
+
+**核心函数**：
+
+| 函数 | 说明 |
 |------|------|
-| [bp_prediction/predict_match.py](bp_prediction/predict_match.py) | 交互式输入对局信息，输出胜率预测 + 特征权重 |
-| [bp_recommendation/bp_predict.py](bp_recommendation/bp_predict.py) | 模拟真实 BP 流程，逐步输出 Pick/Ban 推荐 Top-20 |
+| `BPRecommender()` | 加载 Transformer (Pick/Ban) + LightGBM 级联 + 特征存储 |
+| `recommender.predict_pick()` | 单步 Pick 推荐, 输出候选英雄 + 排序分数 |
+| `recommender.predict_ban()` | 单步 Ban 推荐, 输出候选英雄 + 排序分数 |
+| `interactive_predict()` | 交互式入口, 管理 20 步 BP 流程状态 |
+
+**BP 步骤序列**（`BP_SEQUENCE`，共 20 步）：
+
+```
+Ban1蓝 → Ban1红 → Ban2蓝 → Ban2红 → Ban3蓝 → Ban3红
+Pick1蓝 → Pick1红 → Pick1红 → Pick1蓝
+Ban4蓝 → Ban4红 → Ban5红 → Ban5蓝
+Pick2红 → Pick2蓝 → Pick2蓝 → Pick2红 → Pick2红 → Pick2蓝
+```
+
+### 推理流程说明
+
+两个脚本的内部数据流一致：
+
+```
+用户交互输入
+    ↓
+build_single_match_features() / get_pick_candidate_matrix()
+    ↓
+构建特征向量 (350+ 维 wide features + Transformer 深层特征)
+    ↓
+模型推理 (CatBoost 集成 / Transformer + LightGBM 级联)
+    ↓
+FallbackManager 监控置信度 (异常时降级为规则引擎)
+    ↓
+输出胜率 / 推荐列表 + 特征权重
+```
 
 ---
 

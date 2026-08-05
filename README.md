@@ -455,15 +455,15 @@ lol_public/
 ├── .gitignore
 ├── logger_config.py                # 统一日志配置
 ├── data_checks.py                  # 数据质量检查工具
-├── auto_update_pipeline.py         # 自动更新流水线
+├── auto_update_pipeline.py         # 自动更新一键脚本
 ├── build_feature_baselines.py      # PSI 基线构建
 │
 ├── bp_prediction/                  # 胜负预测模块
 │   ├── predict_backend.py          #   ★ 推理后端入口
-│   ├── predict_match.py            #   交互式测试脚本
-│   ├── run_training.py             #   训练入口 (Walk-forward + OOT)
-│   ├── train_production.py         #   生产模型训练
-│   ├── feature_builder.py          #   特征构建
+│   ├── predict_match.py            #   交互式测试脚本（仅单场推理）
+│   ├── run_training.py             #   一键训练入口
+│   ├── train_production.py         #   生产模式训练
+│   ├── feature_builder.py          #   特征构建模块
 │   ├── feature_pipeline.py         #   特征流水线
 │   ├── feature_utils.py            #   特征工具函数
 │   ├── feature_monitor.py          #   推理特征监控
@@ -473,27 +473,25 @@ lol_public/
 │   ├── check_feature_alignment.py  #   特征对齐检查
 │   ├── check_prediction_alignment.py # 预测对齐检查
 │   ├── export_production_transformer.py  # Transformer 导出
-│   └── training/                   #   训练子模块
+│   └── training/                   #   训练模式训练
 │       ├── train_walk_forward.py   #     Walk-forward 训练
 │       └── extract_transformer_features.py  # Transformer 特征提取
 │
 ├── bp_recommendation/              # BP 推荐模块
 │   ├── bp_recommendation_backend.py#   ★ 推理后端入口
-│   ├── bp_predict.py               #   交互式测试脚本
-│   ├── run_pipeline.py             #   训练流水线入口
+│   ├── bp_predict.py               #   交互式测试脚本（仅单场推理）
+│   ├── run_pipeline.py             #   一键训练流水线入口
 │   ├── feature_pipeline.py         #   特征工程
 │   ├── feature_monitor.py          #   推理特征监控
 │   ├── config.py                   #   配置
 │   ├── init_config.py              #   初始化配置
-│   ├── inference_test.py           #   推理冒烟测试
+│   ├── inference_test.py           #   批量推理冒烟测试
 │   ├── verify_features_alignment.py#   特征对齐验证
 │   ├── verify_predictions.py       #   预测结果验证
 │   ├── model_pick/                 #   Pick 模型
 │   │   ├── model_pick.py           #     Transformer 定义
 │   │   ├── cascade_pick.py         #     LightGBM 级联
 │   │   ├── cascade_pick_search.py  #     级联超参搜索
-│   │   ├── cascade_pick_experiment.py    # 级联实验 v1
-│   │   ├── cascade_pick_experiment_v2.py # 级联实验 v2
 │   │   ├── transformer_pick_search.py    # Transformer 超参搜索
 │   │   ├── dataloader_pick.py      #     数据加载
 │   │   └── train_pick.py           #     训练脚本

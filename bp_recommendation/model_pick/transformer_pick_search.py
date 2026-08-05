@@ -12,7 +12,7 @@ BPTacticalTransformerPick 超参数搜索 (Optuna + TPE)
   - 增加对 PyTorch AMP 和 torch.compile 的支持以加速搜索
 
 用法:
-    cd /Users/siwentu/Desktop/LOL analysis
+    cd <project_root>
     python -m bp_recommendation.model_pick.transformer_pick_search --n_trials 30 --amp --compile
 """
 
@@ -66,7 +66,7 @@ class SearchableTransformerPick(nn.Module):
         self,
         candidate_dim: int,
         context_dim: int,
-        vocab_size: int = 175,
+        vocab_size: int = 180,
         h_dim: int = 512,
         c_dim: int = 64,
         query_dim: int = 384,
@@ -81,6 +81,7 @@ class SearchableTransformerPick(nn.Module):
         pad_idx: int = 0,
         temperature: float = None,
         ban_sample_weight: float = 0.023,
+        role_token_start: int = 2,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -91,8 +92,8 @@ class SearchableTransformerPick(nn.Module):
         self.ban_sample_weight = ban_sample_weight
         self.temperature = temperature if temperature is not None else math.sqrt(query_dim)
 
-        self.role_token_start = vocab_size
-        self.extended_vocab_size = vocab_size + n_positions
+        self.role_token_start = role_token_start
+        self.extended_vocab_size = max(vocab_size, role_token_start + n_positions)
 
         bert_config = DistilBertConfig(
             vocab_size=self.extended_vocab_size,

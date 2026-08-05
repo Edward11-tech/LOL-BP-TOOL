@@ -20,7 +20,7 @@ BP 推荐模型训练流水线（生产环境）
     - run_full_pipeline(): 执行完整训练流水线
 
 使用方法:
-    cd /Users/siwentu/Desktop/LOL analysis
+    cd <project_root>
     
     开发模式（超参搜索用）:
     python -m bp_recommendation.run_pipeline
@@ -117,6 +117,51 @@ def _preflight_checks():
     vocab_json = os.path.join(ROOT_DIR, "cleaned_data", "champion_vocabulary.json")
     checks.append(("champion_vocabulary.json", os.path.exists(vocab_json)))
 
+    # 2b. 英雄词表 v3 验证
+    vocab_ok = True
+    if os.path.exists(vocab_json):
+        with open(vocab_json, "r", encoding="utf-8") as f:
+            vdata = json.load(f)
+        log.info("  --- Vocab v3 Alignment Check ---")
+        log.info(f"  version           = {vdata.get('version', '?')}")
+        log.info(f"  special_tokens    = {vdata.get('special_tokens', {})}")
+        log.info(f"  position_tokens   = {vdata.get('position_tokens', {})}")
+        log.info(f"  role_token_start  = {vdata.get('role_token_start')}")
+        log.info(f"  champion_start_idx= {vdata.get('champion_start_idx')}")
+        log.info(f"  vocab_size        = {vdata.get('vocab_size')}")
+        log.info(f"  n_champions       = {len(vdata.get('champions', []))}")
+        n_champs = len(vdata.get('champions', []))
+        cs = vdata.get('champion_start_idx', 0)
+        vs = vdata.get('vocab_size', 0)
+        rs = vdata.get('role_token_start', -1)
+        # v3 验证: PAD=0, UNK=1, TOP=2..SUP=6, champions from 7
+        expected_specials = {"PAD": 0, "UNK": 1}
+        expected_positions = {"TOP": 2, "JNG": 3, "MID": 4, "BOT": 5, "SUP": 6}
+        if vdata.get("special_tokens") != expected_specials:
+            log.error(f"  [FAIL] special_tokens mismatch! Expected {expected_specials}")
+            vocab_ok = False
+        if vdata.get("position_tokens") != expected_positions:
+            log.error(f"  [FAIL] position_tokens mismatch! Expected {expected_positions}")
+            vocab_ok = False
+        if rs != 2:
+            log.error(f"  [FAIL] role_token_start should be 2, got {rs}")
+            vocab_ok = False
+        if cs != 7:
+            log.error(f"  [FAIL] champion_start_idx should be 7, got {cs}")
+            vocab_ok = False
+        if n_champs + cs != vs:
+            log.error(f"  [FAIL] n_champions({n_champs}) + champion_start_idx({cs}) != vocab_size({vs})")
+            vocab_ok = False
+        if "legacy_v1" in vdata:
+            log.error("  [FAIL] legacy_v1 field still present in vocab (v3 should have no legacy)")
+            vocab_ok = False
+        if vocab_ok:
+            log.info("  [PASS] Vocab v3 alignment verified!")
+        else:
+            log.critical("  [FAIL] Vocab v3 alignment FAILED! Aborting.")
+            return False
+        log.info("  --- End Vocab Check ---")
+
     # 3. 位置映射
     pos_json = os.path.join(ROOT_DIR, "cleaned_data", "champion_position_mapping.json")
     checks.append(("champion_position_mapping.json", os.path.exists(pos_json)))
@@ -209,7 +254,8 @@ def run_full_pipeline(args):
     log.info("=" * 70 + "\n")
 
     if not _preflight_checks():
-        return
+        results["status"] = "FAILED"
+        return False
 
     device_args = ["--device", device_name]
     
@@ -229,7 +275,9 @@ def run_full_pipeline(args):
     feat_cmd = [sys.executable, "-m", f"{MODEL_PKG}.feature_pipeline"]
     success, elapsed = run_command(feat_cmd, "STAGE 0: Feature Pipeline")
     results["stages"]["feature_pipeline"] = {"success": success, "elapsed_sec": round(elapsed, 1)}
-    if not success: return
+    if not success:
+        results["status"] = "FAILED"
+        return False
 
     # --- Stage 1: Pick Training ---
     # 【重构核心】：完全删去命令行超参数拼接，由脚本内部 config.py 自动接管！
@@ -240,21 +288,27 @@ def run_full_pipeline(args):
         + common_train_args + ["--run_name", f"{run_name}_cs", "--ckpt_dir", pick_ckpt] + pick_args
     success, elapsed = run_command(cs_cmd, "STAGE 1a: Pick CS Transformer")
     results["stages"]["pick_cs_transformer"] = {"success": success, "elapsed_sec": round(elapsed, 1)}
-    if not success: return
+    if not success:
+        results["status"] = "FAILED"
+        return False
 
     # 1b: NoCS Transformer (训练完成后会自动导出 logits)
     nocs_cmd = [sys.executable, "-m", f"{MODEL_PKG}.model_pick.train_pick"] \
         + common_train_args + ["--run_name", f"{run_name}_nocs", "--mask_cs", "--ckpt_dir", pick_ckpt] + pick_args
     success, elapsed = run_command(nocs_cmd, "STAGE 1b: Pick NoCS Transformer")
     results["stages"]["pick_nocs_transformer"] = {"success": success, "elapsed_sec": round(elapsed, 1)}
-    if not success: return
+    if not success:
+        results["status"] = "FAILED"
+        return False
 
     # 1c: Cascade Pick
     if not args.skip_cascade:
         cascade_cmd = [sys.executable, "-m", f"{MODEL_PKG}.model_pick.cascade_pick"] + prod_args
         success, elapsed = run_command(cascade_cmd, "STAGE 1c: Cascade Pick")
         results["stages"]["pick_cascade"] = {"success": success, "elapsed_sec": round(elapsed, 1)}
-        if not success: return
+        if not success:
+            results["status"] = "FAILED"
+            return False
     else:
         log.info("  [SKIP] STAGE 1c: Cascade Pick (--skip_cascade)")
 
@@ -264,14 +318,18 @@ def run_full_pipeline(args):
         + common_train_args + ["--run_name", f"{run_name}_ban_cs"] + ban_args
     success, elapsed = run_command(ban_cmd, "STAGE 2a: Ban Transformer")
     results["stages"]["ban_transformer"] = {"success": success, "elapsed_sec": round(elapsed, 1)}
-    if not success: return
+    if not success:
+        results["status"] = "FAILED"
+        return False
 
     # 2b: Cascade Ban
     if not args.skip_cascade:
         cascade_ban_cmd = [sys.executable, "-m", f"{MODEL_PKG}.model_ban.cascade_ban"] + prod_args
         success, elapsed = run_command(cascade_ban_cmd, "STAGE 2b: Cascade Ban")
         results["stages"]["ban_cascade"] = {"success": success, "elapsed_sec": round(elapsed, 1)}
-        if not success: return
+        if not success:
+            results["status"] = "FAILED"
+            return False
     else:
         log.info("  [SKIP] STAGE 2b: Cascade Ban (--skip_cascade)")
 
@@ -325,6 +383,7 @@ def run_full_pipeline(args):
                     log.info("    %-15s: %.4f", k, v)
     log.info("=" * 70)
     log.info("=" * 70 + "\n")
+    return True
 
 
 def _collect_val_metrics(pick_ckpt, ban_ckpt):
@@ -413,10 +472,15 @@ if __name__ == "__main__":
     log.info("=" * 70)
 
     total_start = time.time()
-    run_full_pipeline(args)
+    ok = run_full_pipeline(args)
 
     total_elapsed = time.time() - total_start
     log.info("")
     log.info("=" * 70)
-    log.info(f"  PIPELINE COMPLETE in {total_elapsed / 60:.1f} minutes")
+    if ok:
+        log.info(f"  PIPELINE COMPLETE in {total_elapsed / 60:.1f} minutes")
+    else:
+        log.error(f"  PIPELINE FAILED after {total_elapsed / 60:.1f} minutes")
     log.info("=" * 70)
+    if not ok:
+        sys.exit(1)

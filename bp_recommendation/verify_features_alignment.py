@@ -18,7 +18,7 @@
     - _parse_pre_unavail(): 解析前置局已用英雄（Fearless Draft）
 
 使用方法:
-    cd /Users/siwentu/Desktop/LOL analysis
+    cd <project_root>
     python -m bp_recommendation.verify_features_alignment
     
     用于模型上线前的特征一致性校验，确保训练和推理使用相同的特征计算逻辑。
@@ -70,12 +70,25 @@ CAND_COL_NAMES = [""] * len(CANDIDATE_FEAT_MAP)
 for name, idx in CANDIDATE_FEAT_MAP.items():
     if idx < len(CAND_COL_NAMES): CAND_COL_NAMES[idx] = name
 
-def compare_matrix(name, off_mat, on_mat, col_names, fuzzy_cols=None, fuzzy_threshold=0.1):
+# 训练 dataloader 与线上推理的已知设计差异（非 bug）：
+# - player@4-10: 训练用 ally_missing_roles=clip(1-pos), 线上用 clip(1.2-pos)
+# - role_fit@20-21: 训练用 pos@missing, 线上用动态 role_fit (硬/摇摆英雄)
+TRAIN_SERVE_WHITELIST_COLS = frozenset(range(4, 11)) | {
+    CANDIDATE_FEAT_MAP["ally_role_fit"],
+    CANDIDATE_FEAT_MAP["enemy_role_fit"],
+}
+
+def compare_matrix(name, off_mat, on_mat, col_names, fuzzy_cols=None, fuzzy_threshold=0.1,
+                   whitelist_cols=None):
     fuzzy_cols = fuzzy_cols or []
+    whitelist_cols = whitelist_cols or frozenset()
     log.info(f"\n{'='*60}\n  {name} column-by-column comparison\n{'='*60}")
     mismatches = []
     for col in range(off_mat.shape[1]):
         col_name = col_names[col] if col < len(col_names) else f"col_{col}"
+        if col in whitelist_cols:
+            log.info(f"  [{col:2d}] {col_name:30s}  WHITELIST (intentional train/serve design)")
+            continue
         diff = np.abs(off_mat[:, col] - on_mat[:, col]).max()
         is_fuzzy = col in fuzzy_cols
         threshold = fuzzy_threshold if is_fuzzy else 1e-4
@@ -206,7 +219,8 @@ def _verify_one_sample(offline_dataset, store, idx, action_filter=None):
     # fuzzy_cols: 16-19=synergy/counter (Bayesian 平滑差异), 0-3=meta (PIT 快照时间差异)
     cand_ok, cand_miss = compare_matrix(f"Candidate Matrix ({CANDIDATE_DIM}d) [{action} step={step}]",
                                          off_cand, on_cand, CAND_COL_NAMES,
-                                         fuzzy_cols=[0, 1, 2, 3, 16, 17, 18, 19], fuzzy_threshold=0.1)
+                                         fuzzy_cols=[0, 1, 2, 3, 16, 17, 18, 19], fuzzy_threshold=0.1,
+                                         whitelist_cols=TRAIN_SERVE_WHITELIST_COLS)
 
     return {"ctx_ok": ctx_ok, "cand_ok": cand_ok, "ctx_miss": ctx_miss, "cand_miss": cand_miss,
             "gameid": target_match_row.get("gameid"), "step": step, "action": action}
@@ -232,7 +246,8 @@ def verify_alignment():
                         if last_day_mask.iloc[match_idx]]
     log.info(f"  Training set last day: {max_date.date()}, samples found: {len(last_day_indices)}")
     if not last_day_indices:
-        return log.error("No samples found for the last training day!")
+        log.error("No samples found for the last training day!")
+        return False
 
     log.info("\n[2/3] Initializing online PredictFeatureStore...")
     from bp_recommendation.bp_predict import BPRecommender
@@ -272,6 +287,7 @@ def verify_alignment():
         log.info("  ALL MATCHED! No Online-Offline Skew detected.")
     else:
         log.warning("  Skew detected. Please review mismatches above.")
+    return pick_pass == pick_total and ban_pass == ban_total
 
 if __name__ == "__main__":
     setup_logging(log_dir=Path(LOG_DIR))
@@ -284,4 +300,5 @@ if __name__ == "__main__":
     _run_fh.setFormatter(_run_fmt)
     logging.getLogger().addHandler(_run_fh)
     
-    verify_alignment()
+    if not verify_alignment():
+        sys.exit(1)

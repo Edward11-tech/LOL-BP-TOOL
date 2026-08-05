@@ -24,6 +24,7 @@
 import os
 import sys
 import json
+import datetime
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -89,6 +90,31 @@ DRAFT_KEYWORDS = [
 MAX_UNKNOWN_PLAYERS_PER_TEAM = 2
 
 
+def resolve_match_info_date(match_info):
+    """推理时若无比赛日期，默认为当天（实时预测语义），并写回 match_info。"""
+    match_date = match_info.get("date")
+    if not match_date:
+        match_date = datetime.date.today().isoformat()
+        match_info["date"] = match_date
+    return match_date
+
+
+def _pit_team_profile_row(team_store, team_name, match_date):
+    """从 team_profile store 取 match_date 前最新一行战队画像。"""
+    if team_store is None or team_store.empty or not team_name:
+        return None
+    if "team" not in team_store.columns or "date" not in team_store.columns:
+        if team_name in team_store["team"].values:
+            return team_store[team_store["team"] == team_name].iloc[-1]
+        return None
+    pit = team_store[
+        (team_store["team"] == team_name) & (team_store["date"] <= match_date)
+    ].sort_values("date")
+    if pit.empty:
+        return None
+    return pit.iloc[-1]
+
+
 # =====================================================================
 # 数据加载
 # =====================================================================
@@ -145,14 +171,17 @@ def load_champion_tags():
 
 
 def load_known_champions():
-    """加载已知英雄列表。"""
+    """加载已知英雄列表（仅 playable 英雄，排除 PAD/UNK/位置 token）。"""
     vocab_path = os.path.join(PROJECT_ROOT, "cleaned_data", "champion_vocabulary.json")
     if os.path.exists(vocab_path):
         with open(vocab_path, "r") as f:
             vocab = json.load(f)
-        if isinstance(vocab, dict) and "name_to_idx" in vocab:
-            champions_list = vocab.get("champions", [])
-            return [c["name"] for c in champions_list if "name" in c]
+        if isinstance(vocab, dict) and "champions" in vocab:
+            cs = int(vocab.get("champion_start_idx", 7))
+            return [
+                c["name"] for c in vocab["champions"]
+                if c.get("idx", 0) >= cs and "name" in c
+            ]
     wide_path = os.path.join(FEATURES_DIR, "ALL_prediction_wide_features.parquet")
     if os.path.exists(wide_path):
         df = pd.read_parquet(wide_path)
@@ -373,8 +402,8 @@ def build_single_match_features(match_info, stores, champion_tags, feature_cols=
                 for fc, fv in META_DEFAULTS.items(): features[f"{side}_{pos}_{fc}"] = fv
             for tc, tv in TEAM_PROFILE_DEFAULTS.items(): features[f"{side}_{tc}"] = tv
     else:
-        # 提取时间戳
-        match_date_str = match_info.get("date", "2099-12-31")
+        # 提取时间戳（无 date 时默认为当天实时预测）
+        match_date_str = resolve_match_info_date(match_info)
         match_date = pd.Timestamp(match_date_str)
         
         # --- 3. 选手历史特征 (带严格的 PIT 衰减重置) ---
@@ -525,8 +554,9 @@ def build_predraft_features(match_info, stores, champion_tags,
         feature_cols=feature_cols, tf_features=tf_features
     )
 
-    # 分类特征
+    # 分类特征 (TF 特征也属于 draft 信号，pre-draft 需置零)
     draft_cols, _ = classify_features(feature_cols)
+    draft_cols.update(TF_COLS)
 
     # 将 draft 相关特征置零
     for col in draft_cols:
@@ -718,13 +748,22 @@ def load_tf_extractor(snapshot_path=None, device="cpu"):
         # 避免硬编码导致与实际模型不一致 (如推荐模型 n_layers=3, OOT n_layers=2)
         state_dict = ckpt["model_state_dict"]
 
-        # vocab_size: embedding shape = vocab_size + n_positions (含 role tokens)
+        # vocab_size: v3 方案 embedding 大小即 vocab_size (role token 内置于词表)
         emb_weight = state_dict.get("bert.embeddings.word_embeddings.weight")
         n_positions = _infer_n_positions(state_dict)
+        # 从 vocab 文件读取 role_token_start
+        _vocab_path = os.path.join(PROJECT_ROOT, "cleaned_data", "champion_vocabulary.json")
+        _role_token_start = None
+        _champion_start_idx = None
+        if os.path.exists(_vocab_path):
+            with open(_vocab_path, "r", encoding="utf-8") as _vf:
+                _vdata = json.load(_vf)
+            _role_token_start = _vdata.get("role_token_start", 2)
+            _champion_start_idx = _vdata.get("champion_start_idx", 7)
         if emb_weight is not None:
-            vocab_size = emb_weight.shape[0] - n_positions
+            vocab_size = emb_weight.shape[0]
         else:
-            vocab_size = ckpt.get("vocab_size", 170)
+            vocab_size = ckpt.get("vocab_size", 180)
 
         # n_layers: 从 bert.transformer.layer.{i} 的最大索引推断
         n_layers = _infer_n_layers(state_dict)
@@ -764,6 +803,7 @@ def load_tf_extractor(snapshot_path=None, device="cpu"):
             aux_loss_weight=0.0,
             ban_sample_weight=0.0,
             n_positions=n_positions,
+            role_token_start=_role_token_start if _role_token_start is not None else 2,
         )
         model.load_state_dict(state_dict, strict=True)
         model.to(device)
@@ -902,24 +942,31 @@ def _extract_tf_from_champions(extractor, match_info):
     else:
         global_context[0, 15] = 1.0 # 默认第一局
 
-    # 战队统计
+    # 战队统计：先填训练默认值，再用 PIT 快照覆盖
+    tf_stat_keys = [
+        "team_avg_ckpm", "team_avg_golddiffat15",
+        "team_avg_gamelength", "team_firstdragon_rate",
+        "team_firsttower_rate",
+    ]
+    for offset in (3, 8):
+        for j, key in enumerate(tf_stat_keys):
+            global_context[0, offset + j] = TEAM_PROFILE_DEFAULTS[key]
+
     try:
+        match_date_str = resolve_match_info_date(match_info)
+        match_date = pd.Timestamp(match_date_str)
         stores = load_feature_stores()
         tp = stores.get("team_profile")
         if tp is not None:
             blue_team = match_info.get("blue_team", "")
             red_team = match_info.get("red_team", "")
             for side, team_name, offset in [("blue", blue_team, 3), ("red", red_team, 8)]:
-                if team_name and team_name in tp["team"].values:
-                    row = tp[tp["team"] == team_name].iloc[0]
-                    stat_keys = [
-                        "team_avg_ckpm", "team_avg_golddiffat15",
-                        "team_avg_gamelength", "team_firstdragon_rate",
-                        "team_firsttower_rate",
-                    ]
-                    for j, key in enumerate(stat_keys):
-                        if key in row.index:
-                            global_context[0, offset + j] = float(row[key]) if pd.notna(row[key]) else 0.0
+                row = _pit_team_profile_row(tp, team_name, match_date)
+                if row is None:
+                    continue
+                for j, key in enumerate(tf_stat_keys):
+                    if key in row.index and pd.notna(row[key]):
+                        global_context[0, offset + j] = float(row[key])
     except Exception:
         pass
 
@@ -940,9 +987,11 @@ def _extract_tf_from_champions(extractor, match_info):
     seq_len = 20
     bp_hidden = hidden[:, :seq_len, :] 
 
-    # 【修复 3】：纠正提取索引，并加入 Padding 掩码避免 UNK 噪声污染
-    blue_steps = [0, 2, 4, 6, 9, 10, 13, 15, 17, 18]
-    red_steps = [1, 3, 5, 7, 8, 11, 12, 14, 16, 19]
+    # 仅 Pick 步骤池化 (与训练 extract_transformer_features 一致)
+    BLUE_PICK_STEPS = [6, 9, 10, 17, 18]
+    RED_PICK_STEPS = [7, 8, 11, 16, 19]
+    blue_steps = BLUE_PICK_STEPS
+    red_steps = RED_PICK_STEPS
 
     # 创建掩码：屏蔽 pad_idx 和 unk_idx
     valid_mask = (bp_tensor != extractor.model.pad_idx) & (bp_tensor != UNK_IDX)

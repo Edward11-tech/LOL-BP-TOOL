@@ -18,7 +18,7 @@ Ban Cascade LightGBM 超参数搜索
     - run_search(): 执行超参搜索
 
 使用方法:
-    cd /Users/siwentu/Desktop/LOL analysis
+    cd <project_root>
     python -m bp_recommendation.model_ban.cascade_ban_search --n_trials 50
     
     可选参数:

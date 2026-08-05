@@ -15,7 +15,7 @@
     - seed_configs(): 执行配置初始化，灌入所有模型的最佳超参数
 
 使用方法:
-    cd /Users/siwentu/Desktop/LOL analysis
+    cd <project_root>
     python -m bp_recommendation.init_config
     
     注意: 此脚本会覆盖 training_configs/ 目录下的配置文件，

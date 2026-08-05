@@ -21,7 +21,7 @@
     - run_feature_pipeline(): 运行完整特征流水线
 
 使用方法:
-    cd /Users/siwentu/Desktop/LOL analysis
+    cd <project_root>
     python -m bp_recommendation.feature_pipeline
     
     或在代码中调用:
@@ -121,8 +121,6 @@ POS_SHORT2FULL = dict(zip(POSITIONS_SHORT, POSITIONS_FULL))
 GAME_RESULT_COLS = [
     "gamelength", "ckpm",
     "blue_firstdragon", "red_firstdragon",
-    "blue_firstherald", "red_firstherald",
-    "blue_void_grubs", "red_void_grubs",
     "blue_firsttower", "red_firsttower",
     "blue_golddiffat15", "red_golddiffat15",
 ]
@@ -232,10 +230,16 @@ def load_career_stats(league=None):
     return df
 
 def enforce_pit(matches_df):
+    log = _get_logger()
     df = matches_df.copy()
     keep_cols = [c for c in df.columns if c not in ALL_RESULT_COLS]
     target_df = df[keep_cols].copy()
-    result_df = df[["gameid"] + ALL_RESULT_COLS].copy()
+    missing = [c for c in ALL_RESULT_COLS if c not in df.columns]
+    if missing:
+        log.warning(f"[enforce_pit] matches 缺少结果列，将用 NaN 填充: {missing}")
+    result_df = df[["gameid"]].copy()
+    for col in ALL_RESULT_COLS:
+        result_df[col] = df[col] if col in df.columns else np.nan
     return target_df, result_df
 
 def melt_matches_to_player_rows(matches_df):

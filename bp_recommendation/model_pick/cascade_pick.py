@@ -22,7 +22,7 @@ Pick Cascade LightGBM 级联模型训练
     - _evaluate_pick_at_k(): 评估 Pick@K 指标
 
 使用方法:
-    cd /Users/siwentu/Desktop/LOL analysis
+    cd <project_root>
     python -m bp_recommendation.model_pick.cascade_pick
     
     注意: 需要先训练好 Pick CS/NoCS Transformer 模型并生成 OOF 预测。
@@ -50,7 +50,7 @@ from bp_recommendation.config import (
     record_production_params,
     get_config,
 )
-from bp_recommendation.feature_pipeline import CANDIDATE_FEAT_MAP
+from bp_recommendation.feature_pipeline import CANDIDATE_FEAT_MAP, load_champion_vocabulary, CHAMPION_VOCABULARY_JSON
 
 # 共享数据异常检测工具
 import sys as _sys
@@ -233,8 +233,7 @@ def extract_pick_ranking_data(split="val", features_dir=None):
     nocs_logits = nocs_data["logits"]
     nocs_masks = nocs_data["masks"]
 
-    champion_start_idx = 1
-    vocab_size = cs_logits.shape[1]
+    _, _, vocab_size, special_tokens, champion_start_idx = load_champion_vocabulary(str(CHAMPION_VOCABULARY_JSON))
     pick_indices = np.where(is_pick > 0.5)[0]
 
     # 【修复 1】：从 bp_steps 重建 match_id，确保 GroupKFold 按比赛分组

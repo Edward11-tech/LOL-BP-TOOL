@@ -184,6 +184,10 @@ class TransformerFeatureExtractor:
     def _build_inputs_from_context(self, context_df):
         n = len(context_df)
         vocab_size = self.model.vocab_size
+        # champion_start_idx 固定为 role_token_start + n_positions (v3 方案)
+        role_start = getattr(self.model, 'role_token_start', 2)
+        n_pos = getattr(self.model, 'n_positions', 5)
+        cs = role_start + n_pos
         context_dim = self.model.context_mlp[0].in_features
 
         bp_cols = [f"bp_step{i}_champion_id" for i in range(20)]
@@ -235,7 +239,7 @@ class TransformerFeatureExtractor:
         candidate_dim = self.model.candidate_mlp[0].in_features
         candidate_matrix = torch.zeros(n, vocab_size, candidate_dim, dtype=torch.float32)
         available_mask = torch.ones(n, vocab_size, dtype=torch.float32)
-        available_mask[:, :5] = 0.0
+        available_mask[:, :cs] = 0.0
 
         return {
             "bp_sequence": bp_sequence,
@@ -293,16 +297,14 @@ class TransformerFeatureExtractor:
                 bp_hidden = hidden[:, :seq_len, :]
 
                     
-                blue_steps = [0, 2, 4, 6, 9, 10, 13, 15, 17, 18]
-                red_steps = [1, 3, 5, 7, 8, 11, 12, 14, 16, 19]
-                blue_steps = [s for s in blue_steps if s < seq_len]
-                red_steps = [s for s in red_steps if s < seq_len]
+                BLUE_PICK_STEPS = [6, 9, 10, 17, 18]
+                RED_PICK_STEPS = [7, 8, 11, 16, 19]
+                blue_steps = [s for s in BLUE_PICK_STEPS if s < seq_len]
+                red_steps = [s for s in RED_PICK_STEPS if s < seq_len]
 
-                # 【优化】：带有 Padding Mask 的安全平均
                 seq_mask = (inputs["bp_sequence"] != self.model.pad_idx).float()
-                
-                # 蓝方
-                b_mask = seq_mask[:, blue_steps].unsqueeze(-1) # [batch, 10, 1]
+
+                b_mask = seq_mask[:, blue_steps].unsqueeze(-1)
                 b_hidden = bp_hidden[:, blue_steps, :] * b_mask
                 blue_pooled = b_hidden.sum(dim=1) / b_mask.sum(dim=1).clamp(min=1e-9)
                 

@@ -8,7 +8,7 @@ Cascade Pick 超参数搜索 (Optuna + TPE) — 统一 Phase-Aware Routing
   - 使用 GroupKFold 5-Fold CV
 
 用法:
-    cd /Users/siwentu/Desktop/LOL analysis
+    cd <project_root>
     python -m bp_recommendation.model_pick.cascade_pick_search --n_trials 60
 """
 

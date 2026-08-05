@@ -22,7 +22,7 @@ Ban 阶段 Transformer 模型定义
     model = BPTacticalTransformer(
         candidate_dim=32,
         context_dim=20,
-        vocab_size=175
+        vocab_size=180
     )
     # 输入: bp_seq, global_ctx, candidate_matrix, candidate_mask
     # 输出: scores, aux_loss
@@ -42,7 +42,7 @@ class BPTacticalTransformer(nn.Module):
         self,
         candidate_dim: int,       # 强制必传，通常为 32 或 33
         context_dim: int,         # 强制必传，通常为 20 或 24
-        vocab_size: int = 175,
+        vocab_size: int = 180,
         h_dim: int = 384,
         n_layers: int = 6,
         n_heads: int = 6,

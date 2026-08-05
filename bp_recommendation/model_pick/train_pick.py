@@ -153,7 +153,7 @@ def evaluate(model, val_loader, device, mask_cs=False, use_amp=False):
     model.eval()
     
     n_samples = len(val_loader.dataset)
-    vocab_size = getattr(model, 'vocab_size', 175) # 兼容编译后的模型
+    vocab_size = getattr(model, 'vocab_size', 180) # 兼容编译后的模型
     
     # 从第一个 batch 动态获取 cand_dim
     sample_batch = next(iter(val_loader))
@@ -365,7 +365,7 @@ def get_bare_model(model):
     return bare_model
 
 
-def save_checkpoint(model, optimizer, epoch, metrics, path, context_dim=None, candidate_dim=None):
+def save_checkpoint(model, optimizer, epoch, metrics, path, context_dim=None, candidate_dim=None, role_token_start=None, vocab_size=None, champion_start_idx=None):
     bare_model = get_bare_model(model)
     ckpt = {
         "epoch": epoch,
@@ -377,6 +377,12 @@ def save_checkpoint(model, optimizer, epoch, metrics, path, context_dim=None, ca
         ckpt["context_dim"] = context_dim
     if candidate_dim is not None:
         ckpt["candidate_dim"] = candidate_dim
+    if role_token_start is not None:
+        ckpt["role_token_start"] = role_token_start
+    if vocab_size is not None:
+        ckpt["vocab_size"] = vocab_size
+    if champion_start_idx is not None:
+        ckpt["champion_start_idx"] = champion_start_idx
     torch.save(ckpt, path)
 
 
@@ -541,6 +547,14 @@ def main(override_args=None):
 
     _, _, vocab_size, _, _ = load_champion_vocabulary(VOCAB_PATH)
 
+    # v3 方案: 从 vocab 文件读取 role_token_start (固定为 2)
+    import json as _json
+    with open(VOCAB_PATH, "r", encoding="utf-8") as _f:
+        _vocab_meta = _json.load(_f)
+    role_token_start = _vocab_meta.get("role_token_start", 2)
+    champion_start_idx = _vocab_meta.get("champion_start_idx", 7)
+    logger.info(f"  vocab_size={vocab_size}, role_token_start={role_token_start}, champion_start_idx={champion_start_idx}")
+
     sample_batch = next(iter(train_loader))
     context_dim_inferred = sample_batch["global_context"].shape[-1]
     candidate_dim_inferred = sample_batch["candidate_matrix"].shape[-1]
@@ -576,7 +590,52 @@ def main(override_args=None):
         tactical_hidden=args.tactical_hidden,
         aux_loss_weight=args.aux_loss_weight,
         ban_sample_weight=args.ban_sample_weight,
+        role_token_start=role_token_start,
     ).to(device)
+
+    # =====================================================================
+    # [ALIGN CHECK] Token/Embedding 对齐验证
+    # =====================================================================
+    bare_model = get_bare_model(model)
+    _emb = bare_model.bert.embeddings.word_embeddings.weight
+    logger.info("=" * 70)
+    logger.info("  [ALIGN CHECK] Token/Embedding 维度对齐验证")
+    logger.info("=" * 70)
+    logger.info(f"  vocab_size (模型)     = {bare_model.vocab_size}")
+    logger.info(f"  role_token_start      = {bare_model.role_token_start}")
+    logger.info(f"  n_positions           = {bare_model.n_positions}")
+    logger.info(f"  champion_start_idx    = {champion_start_idx} (期望: role_token_start + n_positions = {role_token_start + bare_model.n_positions})")
+    logger.info(f"  extended_vocab_size   = {bare_model.extended_vocab_size}")
+    logger.info(f"  word_embeddings shape = {tuple(_emb.shape)}")
+    # 断言检查
+    _assert_ok = True
+    if bare_model.vocab_size != vocab_size:
+        logger.error(f"  [MISMATCH] model.vocab_size ({bare_model.vocab_size}) != vocab_size from file ({vocab_size})")
+        _assert_ok = False
+    if bare_model.role_token_start != role_token_start:
+        logger.error(f"  [MISMATCH] model.role_token_start ({bare_model.role_token_start}) != {role_token_start}")
+        _assert_ok = False
+    if champion_start_idx != role_token_start + bare_model.n_positions:
+        logger.error(f"  [MISMATCH] champion_start_idx ({champion_start_idx}) != role_token_start + n_positions ({role_token_start + bare_model.n_positions})")
+        _assert_ok = False
+    if bare_model.extended_vocab_size != bare_model.vocab_size:
+        logger.error(f"  [MISMATCH] extended_vocab_size ({bare_model.extended_vocab_size}) should equal vocab_size ({bare_model.vocab_size}) in v3")
+        _assert_ok = False
+    if _emb.shape[0] != bare_model.extended_vocab_size:
+        logger.error(f"  [MISMATCH] embedding dim 0 ({_emb.shape[0]}) != extended_vocab_size ({bare_model.extended_vocab_size})")
+        _assert_ok = False
+    # 验证特殊 token 位置
+    logger.info(f"  PAD=0, UNK=1, TOP=2, JNG=3, MID=4, BOT=5, SUP=6")
+    logger.info(f"  第一个英雄 idx = {champion_start_idx}, 英雄数 = {vocab_size - champion_start_idx}")
+    if champion_start_idx != 7:
+        logger.error(f"  [MISMATCH] champion_start_idx should be 7 in v3 scheme, got {champion_start_idx}")
+        _assert_ok = False
+    if _assert_ok:
+        logger.info("  [ALIGN CHECK] ✓ 所有维度对齐验证通过!")
+    else:
+        logger.critical("  [ALIGN CHECK] ✗ 维度对齐失败! 训练已终止。")
+        raise RuntimeError("Token/Embedding alignment check FAILED. See logs above.")
+    logger.info("=" * 70)
 
     # 【加速】Torch Compile 计算图编译
     if args.compile and device.type == "cuda":
@@ -686,7 +745,9 @@ def main(override_args=None):
                         versioned_ckpt = os.path.join(effective_ckpt_dir, f"best_model_{model_type_label.lower()}_ep{epoch}.pt")
                         canonical_ckpt = os.path.join(effective_ckpt_dir, f"best_model_{model_type_label.lower()}.pt")
                         save_checkpoint(model, optimizer, epoch, val_metrics, versioned_ckpt,
-                                        context_dim=context_dim_inferred, candidate_dim=candidate_dim_inferred)
+                                        context_dim=context_dim_inferred, candidate_dim=candidate_dim_inferred,
+                                        role_token_start=role_token_start,
+                                        vocab_size=vocab_size, champion_start_idx=champion_start_idx)
                         import shutil
                         shutil.copy2(versioned_ckpt, canonical_ckpt)
                         src_size = os.path.getsize(versioned_ckpt)
@@ -713,7 +774,9 @@ def main(override_args=None):
         if is_production:
             last_ckpt_path = os.path.join(effective_ckpt_dir, f"last_model_{model_type_label.lower()}.pt")
             save_checkpoint(model, optimizer, args.epochs, {}, last_ckpt_path,
-                            context_dim=context_dim_inferred, candidate_dim=candidate_dim_inferred)
+                            context_dim=context_dim_inferred, candidate_dim=candidate_dim_inferred,
+                            role_token_start=role_token_start,
+                            vocab_size=vocab_size, champion_start_idx=champion_start_idx)
             canonical_ckpt = os.path.join(effective_ckpt_dir, f"best_model_{model_type_label.lower()}.pt")
             import shutil
             shutil.copy2(last_ckpt_path, canonical_ckpt)
@@ -858,7 +921,7 @@ def main(override_args=None):
     model.eval()
     
     n_train_samples = len(train_loader_export.dataset)
-    vocab_size = getattr(model, 'vocab_size', 175)
+    vocab_size = getattr(model, 'vocab_size', 180)
     
     # 从第一个 batch 动态获取 cand_dim
     sample_export = next(iter(train_loader_export))

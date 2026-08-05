@@ -11,7 +11,7 @@ BP 胜负预测模型 - Deep-Tabular Cascade Fusion (正式版)
   LEC      AUC = 0.6260±0.0780
 
 核心优化:
-  1. 联赛自适应样本权重: LPL=1.3x, LEC=1.5x, LCK=1.0x
+  1. 联赛自适应样本权重: LCK=1.2x, LPL=1.0x, LEC=0.8x
   2. 镜像增强: 交换红蓝方特征 + 翻转结果 (强制蓝红对称性)
   3. 优化超参数: iterations=800, depth=6, lr=0.035, l2=5.0
   4. Label Smoothing = 0.05
@@ -166,7 +166,7 @@ def create_mirror_samples(X_df, y_arr):
 def compute_league_weights(train_df, weight_config=None):
     """计算联赛自适应样本权重 (从 config.py 获取默认配置)。
 
-    weight_config: dict, e.g. {"LPL": 1.3, "LEC": 1.5, "LCK": 1.0}
+    weight_config: dict, e.g. {"LCK": 1.2, "LPL": 1.0, "LEC": 0.8}
     默认使用 config.py 中的 league_weights 配置
     """
     if weight_config is None:
@@ -797,7 +797,7 @@ def main():
             "validation_method": f"5-Fold Rolling OOT (Fixed Training Window = {window_months} months)",
             "architecture": "Optimized Deep-Tabular Cascade Fusion: Transformer(4-dim) + CatBoost-7Seed-Bagging",
             "optimizations": [
-                "League-adaptive weights: LPL=1.3x, LEC=1.5x, LCK=1.0x",
+                "League-adaptive weights: LCK=1.2x, LPL=1.0x, LEC=0.8x",
                 "Mirror augmentation (blue-red symmetry)",
                 "Optimized hyperparams (iterations=800, stronger reg)",
             ],

@@ -37,7 +37,7 @@ from bp_prediction.feature_builder import (
     MAX_UNKNOWN_PLAYERS_PER_TEAM, ROOKIE_PENALTY,
     load_feature_cols, load_feature_stores, load_champion_tags, load_known_champions,
     resolve_team_name, get_team_roster,
-    build_single_match_features,
+    build_single_match_features, resolve_match_info_date,
 )
 
 from bp_prediction.config import (
@@ -290,6 +290,20 @@ def collect_match_info(known_champions):
         validator=validate_yes_no,
         retry_msg="请输入 y 或 n"
     )
+
+    def validate_game_num(s):
+        try:
+            n = int(s.strip())
+            return n if 1 <= n <= 5 else None
+        except (TypeError, ValueError):
+            return None
+
+    match_info["game_num"] = get_input_with_validation(
+        "  系列赛局数 (1-5, BO5 第几局): ",
+        validator=validate_game_num,
+        retry_msg="请输入 1 到 5 的整数"
+    )
+    resolve_match_info_date(match_info)
 
     log.info("\n  --- 阵容选择 ---")
     log.info("  位置顺序: 上单 → 打野 → 中单 → ADC → 辅助")

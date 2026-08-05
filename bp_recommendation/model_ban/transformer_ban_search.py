@@ -57,7 +57,7 @@ log = get_logger(__name__)
 class SearchableTransformerBan(nn.Module):
     """提取自 model_ban.py 的结构，开放超参供 Optuna 搜索"""
     def __init__(
-        self, candidate_dim: int, context_dim: int, vocab_size: int = 175,
+        self, candidate_dim: int, context_dim: int, vocab_size: int = 180,
         h_dim: int = 768, c_dim: int = 64, query_dim: int = 256,
         n_layers: int = 6, n_heads: int = 12, dropout: float = 0.15,
         attention_dropout: float = 0.15, candidate_hidden: int = 256,

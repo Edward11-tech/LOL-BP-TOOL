@@ -80,12 +80,8 @@ PICK_POSITIONS_RED = ["jng", "mid", "top", "bot", "sup"]
 GAME_RESULT_COLS = [
     "gamelength", "ckpm",
     "blue_firstdragon", "red_firstdragon",
-    "blue_firstherald", "red_firstherald",
-    "blue_void_grubs", "red_void_grubs",
     "blue_firsttower", "red_firsttower",
     "blue_golddiffat15", "red_golddiffat15",
-    "blue_golddiffat20", "red_golddiffat20",
-    "blue_golddiffat25", "red_golddiffat25",
 ]
 PLAYER_RESULT_COLS = []
 for _s in ["blue", "red"]:
@@ -334,7 +330,12 @@ def enforce_pit(matches_df):
     df = matches_df.copy()
     keep_cols = [c for c in df.columns if c not in ALL_RESULT_COLS]
     target_df = df[keep_cols].copy()
-    result_df = df[["gameid"] + ALL_RESULT_COLS].copy()
+    missing = [c for c in ALL_RESULT_COLS if c not in df.columns]
+    if missing:
+        log.warning(f"[enforce_pit] matches 缺少结果列，将用 NaN 填充: {missing}")
+    result_df = df[["gameid"]].copy()
+    for col in ALL_RESULT_COLS:
+        result_df[col] = df[col] if col in df.columns else np.nan
     return target_df, result_df
 
 def melt_matches_to_player_rows(matches_df):

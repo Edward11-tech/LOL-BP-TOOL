@@ -14,7 +14,7 @@ auto_update_pipeline.py — 全自动数据更新与模型重训练流水线
 
 运行模式:
   --mode complete    完整模式 (7阶段): 严格对齐上线前检查流程
-    数据爬取 (含数据清洗, run_all_scrapers.py 任务8 执行)
+    数据爬取 (含后处理, run_all_scrapers.py id 0-8: 爬取→清洗→校验→融合)
     → 推荐模型训练模式 (Pick/Ban 训练 + 报告指标 + 保存参数)
     → 推荐模型生产模式 (使用参数盲训)
     → 推荐模型一致性检测
@@ -33,7 +33,7 @@ auto_update_pipeline.py — 全自动数据更新与模型重训练流水线
     自动定时每14天一次
 
   --mode no_scrape   跳过爬取模式 (8阶段): 已有原始数据, 从后处理开始从头重训
-    数据后处理 (跳过爬取 id 0-5, 执行 id 6-9: 位置概率→验证→清洗→贝叶斯融合)
+    数据后处理 (跳过爬取 id 0-5, 执行 id 6-8: 清洗→校验→贝叶斯融合)
     → 推荐模型训练模式 (Pick/Ban 训练 + 报告指标 + 保存参数)
     → 推荐模型生产模式 (使用参数盲训)
     → 推荐模型一致性检测
@@ -108,7 +108,7 @@ STAGE_SCRIPTS = {
         "name": "数据爬取",
         "script": PROJECT_ROOT / "data_scraper" / "run_all_scrapers.py",
         "cwd": PROJECT_ROOT / "data_scraper",
-        "description": "从各数据源爬取最新数据 (run_all_scrapers.py 任务8 自动调用 data_cleaning.py)",
+        "description": "从各数据源爬取最新数据 (run_all_scrapers.py id 0-8: 爬取→清洗 id6→校验 id7→融合 id8)",
     },
     "data_cleaning": {
         "name": "数据清洗",
@@ -120,7 +120,7 @@ STAGE_SCRIPTS = {
         "name": "数据后处理 (跳过爬取)",
         "script": PROJECT_ROOT / "data_scraper" / "run_all_scrapers.py",
         "cwd": PROJECT_ROOT / "data_scraper",
-        "description": "跳过爬取 (id 0-5), 执行后处理: 位置概率(6) → 验证(7) → 数据清洗(8) → 贝叶斯融合(9)",
+        "description": "跳过爬取 (id 0-5), 执行后处理: 数据清洗(6) → 校验(7) → 贝叶斯融合(8)",
         "extra_args": ["--no-scrape"],
     },
 
@@ -187,7 +187,7 @@ STAGE_SCRIPTS = {
 # 运行模式定义
 # =====================================================================
 # 完整模式 (complete): 严格对齐上线前检查流程
-#   数据爬取 (含数据清洗, run_all_scrapers.py 任务8 自动调用 data_cleaning.py)
+#   数据爬取 (含后处理, run_all_scrapers.py id 0-8)
 #   → 推荐模型训练模式 (Pick/Ban 训练 + 报告指标 + 保存参数)
 #   → 推荐模型生产模式 (使用参数盲训)
 #   → 推荐模型一致性检测
@@ -235,7 +235,7 @@ MODE_PRODUCTION_STAGES = [
 #   → PSI 特征基线重建
 #   → 启动 app.py
 MODE_NO_SCRAPE_STAGES = [
-    "data_postprocess",                 # 跳过爬取, 执行完整后处理 (id 6-9: 位置概率→验证→清洗→贝叶斯融合)
+    "data_postprocess",                 # 跳过爬取, 执行后处理 (id 6-8: 清洗→校验→贝叶斯融合)
     "bp_recommendation_training",
     "bp_recommendation_production",
     "bp_recommendation_validation",
@@ -269,15 +269,15 @@ PRODUCTION_CHECK_FILES = {
         "cleaned_data/champion_ranks_cleaned.csv",
     ],
     "data_postprocess": [
-        # 后处理阶段 (id 6-9) 产出的所有文件
-        "cleaned_data/champion_position_mapping.json",      # id=6 add_position_probabilities
-        "cleaned_data/matches_cleaned.csv",                 # id=8 data_cleaning
+        # 后处理阶段 (id 6-8) 产出的所有文件
+        "cleaned_data/champion_position_mapping.json",      # id=6 data_cleaning
+        "cleaned_data/matches_cleaned.csv",                 # id=6 data_cleaning
         "cleaned_data/player_career_hero_stats_cleaned.csv",
         "cleaned_data/champion_counters_cleaned.csv",
         "cleaned_data/champion_synergy_cleaned.csv",
         "cleaned_data/champion_ranks_cleaned.csv",
         "cleaned_data/active_rosters.csv",
-        "cleaned_data/merged_champion_stats.csv",            # id=9 merge_champion_stats
+        "cleaned_data/merged_champion_stats.csv",            # id=8 merge_champion_stats
     ],
     # 推荐模型: 训练模式产出 checkpoint + 参数文件 + cascade 模型
     "bp_recommendation_training": [
@@ -369,7 +369,7 @@ DEFAULT_CONFIG = {
     "timeouts": {
         "data_scrape": 9000,                       # 2.5 小时 (含数据清洗)
         "data_cleaning": 1800,                     # 30 分钟 (独立数据清洗)
-        "data_postprocess": 3600,                  # 1 小时 (位置概率 + 验证 + 清洗 + 贝叶斯融合)
+        "data_postprocess": 3600,                  # 1 小时 (清洗 + 校验 + 贝叶斯融合)
         "bp_recommendation_training": 14400,       # 4 小时 (DEVELOPMENT 模式含验证)
         "bp_recommendation_production": 14400,     # 4 小时 (PRODUCTION 盲训)
         "bp_recommendation_validation": 1800,      # 30 分钟 (一致性检测)
@@ -1315,6 +1315,7 @@ def run_model_validation(config: dict, logger: logging.Logger) -> dict:
         try:
             predict_data = json.dumps({
                 "league": "LCK", "is_playoff": False, "first_pick": "blue",
+                "game_num": 1, "date": "2025-06-15",
                 "blue_team": "T1", "red_team": "Gen.G",
                 "blue_champions": {"top": "Aatrox", "jng": "Vi", "mid": "Ahri",
                                    "bot": "Jinx", "sup": "Alistar"},
@@ -1345,6 +1346,7 @@ def run_model_validation(config: dict, logger: logging.Logger) -> dict:
         try:
             delta_data = json.dumps({
                 "league": "LCK", "is_playoff": False, "first_pick": "blue",
+                "game_num": 1, "date": "2025-06-15",
                 "blue_team": "T1", "red_team": "Gen.G",
                 "blue_champions": {"top": "Aatrox", "jng": "Vi", "mid": "Ahri",
                                    "bot": "Jinx", "sup": "Alistar"},
@@ -1593,6 +1595,50 @@ def run_pipeline(config: dict, logger: logging.Logger, start_stage: int = 0,
 # =====================================================================
 # 异常 Error 汇总日志
 # =====================================================================
+def _extract_log_level(line: str) -> Optional[str]:
+    """从标准日志行提取级别, 如 ``[INFO   ]`` -> ``INFO``。"""
+    upper = line.upper()
+    for level in ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"):
+        if f"[{level}" in upper:
+            return level
+    return None
+
+
+_ACTIONABLE_FAILURE_PHRASES = (
+    "执行失败",
+    "阶段失败",
+    "输出验证失败",
+    "流水线执行失败",
+    "训练失败",
+    "校验失败",
+)
+
+# 阶段说明、汇总统计等描述性文本，含「失败/警告」等词但并非真实异常
+_SUMMARY_DESCRIPTIVE_NOISE = (
+    "失败时阻断",
+    "说明:",
+    "generate_error_summary",
+    "异常汇总日志已生成",
+    "严重错误:",
+)
+
+
+def _is_summary_descriptive_noise(line: str) -> bool:
+    return any(marker in line for marker in _SUMMARY_DESCRIPTIVE_NOISE)
+
+
+def _is_actionable_failure(line: str, low: str, log_level: Optional[str]) -> bool:
+    """判断是否为真实失败信号, 排除阶段说明等描述性文本。"""
+    if "[fail]" in low or any(phrase in line for phrase in _ACTIONABLE_FAILURE_PHRASES):
+        return True
+    if "failed" in low or "失败" in low:
+        # INFO/DEBUG 中的「失败」多为说明文字 (如「失败时阻断流水线」)
+        if log_level in ("INFO", "DEBUG"):
+            return False
+        return True
+    return False
+
+
 def generate_error_summary(run_ts: str, logger: logging.Logger, results: dict):
     """
     扫描本次流水线运行的完整日志，提取所有 ERROR / WARNING / 数据质量异常，
@@ -1601,17 +1647,6 @@ def generate_error_summary(run_ts: str, logger: logging.Logger, results: dict):
     输出文件: logs/auto_update/error_summary_{run_ts}.log
     """
     summary_path = LOG_DIR / f"error_summary_{run_ts}.log"
-
-    # 关键异常模式 (不区分大小写匹配)
-    # 涵盖: 数据质量、NaN、空值、校验失败、段错误、Traceback 等
-    CRITICAL_PATTERNS = [
-        "error", "exception", "traceback", "failed", "失败",
-        "sigsegv", "段错误", "critical",
-        "nan", "空值", "缺失", "missing",
-        "质量校验失败", "quality check",
-        "不完整", "invalid", "无效",
-        "warning", "警告",
-    ]
 
     # 噪声模式: 这些行虽然包含关键词但不是真正的异常
     NOISE_PATTERNS = [
@@ -1626,7 +1661,6 @@ def generate_error_summary(run_ts: str, logger: logging.Logger, results: dict):
         logger.warning(f"流水线日志文件不存在，跳过异常汇总: {pipeline_log}")
         return
 
-    error_lines = []
     warning_lines = []
     critical_lines = []
 
@@ -1638,19 +1672,28 @@ def generate_error_summary(run_ts: str, logger: logging.Logger, results: dict):
                     continue
 
                 low = line_stripped.lower()
+                log_level = _extract_log_level(line_stripped)
 
                 # 跳过噪声行
                 if any(n.lower() in low for n in NOISE_PATTERNS):
                     continue
 
+                # 跳过阶段说明、汇总统计等描述性文本
+                if _is_summary_descriptive_noise(line_stripped):
+                    continue
+
+                is_info_or_debug = log_level in ("INFO", "DEBUG")
+
                 # 分类收集
                 if "[error]" in low or "[critical]" in low or "traceback" in low or "sigsegv" in low or "段错误" in low:
                     critical_lines.append((line_num, line_stripped))
-                elif "[warning]" in low or "警告" in low:
+                elif "[warning]" in low or (not is_info_or_debug and "警告" in low):
                     warning_lines.append((line_num, line_stripped))
-                elif any(p in low for p in ["nan", "空值", "缺失", "质量校验失败", "无效", "不完整"]):
+                elif not is_info_or_debug and any(
+                    p in low for p in ["nan", "空值", "缺失", "质量校验失败", "无效", "不完整"]
+                ):
                     warning_lines.append((line_num, line_stripped))
-                elif "failed" in low or "失败" in low:
+                elif _is_actionable_failure(line_stripped, low, log_level):
                     critical_lines.append((line_num, line_stripped))
     except Exception as e:
         logger.error(f"读取流水线日志失败: {e}")

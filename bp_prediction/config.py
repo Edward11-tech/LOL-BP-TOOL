@@ -87,8 +87,8 @@ class SharedConfig:
     # Label Smoothing
     label_smoothing: float = 0.05
 
-    # 联赛自适应权重
-    league_weights: Dict = field(default_factory=lambda: {"LPL": 1.3, "LEC": 1.5, "LCK": 1.0})
+    # 联赛自适应权重 (Round 2 OOT 实验最优: B_lck12_lec08)
+    league_weights: Dict = field(default_factory=lambda: {"LCK": 1.2, "LPL": 1.0, "LEC": 0.8})
 
     # 镜像增强
     mirror_augmentation: bool = True

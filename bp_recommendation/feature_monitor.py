@@ -46,7 +46,7 @@ _BASE_CANDIDATE_RANGES: Dict[str, Tuple[float, float]] = {
     
     "ally_synergy": (0.0, 1.0), "enemy_synergy": (0.0, 1.0),
     "enemy_counter": (0.0, 1.0), "ally_counter": (0.0, 1.0),
-    "ally_role_fit": (0.0, 1.0), "enemy_role_fit": (0.0, 1.0),
+    "ally_role_fit": (0.0, 1.2), "enemy_role_fit": (0.0, 1.2),
     
     "is_pick": (0.0, 1.0),
     "enemy_mastery_max": (0.0, 150.0),

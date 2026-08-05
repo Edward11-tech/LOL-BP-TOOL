@@ -9,7 +9,7 @@
 
 训练策略:
   1. 全量数据 (截止到 cutoff_date) + 指数时间衰减权重 (半衰期 180 天)
-  2. 联赛自适应权重: LPL=1.3x, LEC=1.5x, LCK=1.0x
+  2. 联赛自适应权重: LCK=1.2x, LPL=1.0x, LEC=0.8x
   3. 镜像增强: 交换红蓝方特征 + 翻转结果
   4. Label Smoothing = 0.05
   5. 7-Seed Bagging + Early Stopping

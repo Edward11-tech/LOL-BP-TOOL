@@ -451,6 +451,7 @@ FallbackManager 监控置信度 (异常时降级为规则引擎)
 ```
 lol_public/
 ├── README.md                       # 本文件
+├── requirements.txt                # Python 依赖
 ├── .gitignore
 ├── logger_config.py                # 统一日志配置
 ├── data_checks.py                  # 数据质量检查工具
@@ -460,26 +461,49 @@ lol_public/
 ├── bp_prediction/                  # 胜负预测模块
 │   ├── predict_backend.py          #   ★ 推理后端入口
 │   ├── predict_match.py            #   交互式测试脚本
+│   ├── run_training.py             #   训练入口 (Walk-forward + OOT)
+│   ├── train_production.py         #   生产模型训练
 │   ├── feature_builder.py          #   特征构建
+│   ├── feature_pipeline.py         #   特征流水线
+│   ├── feature_utils.py            #   特征工具函数
+│   ├── feature_monitor.py          #   推理特征监控
 │   ├── explainability.py           #   SHAP 可解释性
 │   ├── bp_delta.py                 #   BP 价值差
 │   ├── config.py                   #   配置
-│   └── training/                   #   训练脚本
+│   ├── check_feature_alignment.py  #   特征对齐检查
+│   ├── check_prediction_alignment.py # 预测对齐检查
+│   ├── export_production_transformer.py  # Transformer 导出
+│   └── training/                   #   训练子模块
 │       ├── train_walk_forward.py   #     Walk-forward 训练
-│       ├── extract_transformer_features.py  # Transformer 特征提取
-│       └── train_production.py     #     生产模型训练
+│       └── extract_transformer_features.py  # Transformer 特征提取
 │
 ├── bp_recommendation/              # BP 推荐模块
 │   ├── bp_recommendation_backend.py#   ★ 推理后端入口
 │   ├── bp_predict.py               #   交互式测试脚本
+│   ├── run_pipeline.py             #   训练流水线入口
 │   ├── feature_pipeline.py         #   特征工程
+│   ├── feature_monitor.py          #   推理特征监控
 │   ├── config.py                   #   配置
+│   ├── init_config.py              #   初始化配置
+│   ├── inference_test.py           #   推理冒烟测试
+│   ├── verify_features_alignment.py#   特征对齐验证
+│   ├── verify_predictions.py       #   预测结果验证
 │   ├── model_pick/                 #   Pick 模型
 │   │   ├── model_pick.py           #     Transformer 定义
 │   │   ├── cascade_pick.py         #     LightGBM 级联
+│   │   ├── cascade_pick_search.py  #     级联超参搜索
+│   │   ├── cascade_pick_experiment.py    # 级联实验 v1
+│   │   ├── cascade_pick_experiment_v2.py # 级联实验 v2
+│   │   ├── transformer_pick_search.py    # Transformer 超参搜索
 │   │   ├── dataloader_pick.py      #     数据加载
 │   │   └── train_pick.py           #     训练脚本
 │   └── model_ban/                  #   Ban 模型 (结构同 model_pick)
+│       ├── model_ban.py
+│       ├── cascade_ban.py
+│       ├── cascade_ban_search.py
+│       ├── transformer_ban_search.py
+│       ├── dataloader_ban.py
+│       └── train_ban.py
 │
 ├── fallback/                       # 规则兜底模块
 │   ├── fallback_manager.py         #   兜底管理器

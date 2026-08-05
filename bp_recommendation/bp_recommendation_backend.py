@@ -96,7 +96,7 @@ class BPRecommendationBackend:
     MAX_CONCURRENT_INFERENCES = 2        # 最大并发推理数（资源隔离）
     INFERENCE_TIMEOUT_SECONDS = 10.0     # 单次推理超时时间
     RATE_LIMIT_WINDOW_SECONDS = 60.0     # 限流时间窗口
-    RATE_LIMIT_MAX_REQUESTS = 30         # 时间窗口内最大请求数
+    RATE_LIMIT_MAX_REQUESTS = 60         # 时间窗口内最大请求数 (60s 内最多 60 次, 覆盖 3 场完整 BP)
 
     def __init__(self):
         self.recommender = None
@@ -272,8 +272,36 @@ class BPRecommendationBackend:
         return sorted(self.store.team_players_map.keys())
 
     def get_players(self, team_name):
-        if not self.store:
+        """从 active_rosters.csv 返回战队选手（与 predict 后端格式一致）。"""
+        if not self.store or not team_name:
             return []
+        try:
+            from bp_prediction.feature_builder import get_team_roster, resolve_team_name
+            all_teams = set()
+            for teams in (self.league_teams or {}).values():
+                all_teams.update(teams)
+            resolved = resolve_team_name(team_name, all_teams) or team_name
+            roster = get_team_roster(resolved)
+            if roster:
+                pos_web = {
+                    "top": "top", "jungle": "jungle", "mid": "mid",
+                    "bot": "bot", "support": "support",
+                    "jng": "jungle", "sup": "support",
+                }
+                result = []
+                for p in roster:
+                    role = str(p.get("role", "")).strip().lower()
+                    web_role = pos_web.get(role, role)
+                    pname = p.get("player_name") or p.get("player_id") or ""
+                    if pname:
+                        result.append({
+                            "player_id": pname,
+                            "player_name": pname,
+                            "role": web_role,
+                        })
+                return result
+        except Exception as e:
+            log.warning(f"active_rosters 加载失败, 回退 context 快照: {e}")
         return sorted(self.store.team_players_map.get(team_name, []))
 
     def get_team_style(self, team_name):
@@ -334,7 +362,11 @@ class BPRecommendationBackend:
 
         if not self._check_rate_limit():
             log.warning(f"[req={request_id}] rate limited")
-            return {"error": "请求过于频繁，请稍后再试", "request_id": request_id}
+            return {
+                "error": "请求过于频繁，请稍后再试",
+                "rate_limited": True,
+                "request_id": request_id,
+            }
         if not self._loaded:
             log.error(f"[req={request_id}] model not loaded")
             return {"error": "模型未加载", "request_id": request_id}
@@ -365,7 +397,12 @@ class BPRecommendationBackend:
         r_style = self.store.team_style_dict.get(r_team, [0.7, 0.0, 1900.0, 0.5, 0.5])
         
         playoffs_f = 1.0 if payload.get("playoffs") else 0.0
-        first_pick_f = float(payload.get("first_pick_map_side", 1.0))
+        # first_pick_map_side 可能是 0/1 数值或 "red"/"blue" 字符串
+        first_pick_raw = payload.get("first_pick_map_side", 1.0)
+        if isinstance(first_pick_raw, str):
+            first_pick_f = 1.0 if first_pick_raw.lower() == "blue" else 0.0
+        else:
+            first_pick_f = float(first_pick_raw)
         
         game_num = int(payload.get("game_num", 1))
         game_num_vec = np.zeros(5, dtype=np.float32)
@@ -438,6 +475,13 @@ class BPRecommendationBackend:
             return {"error": f"推荐失败: {str(e)}", "request_id": request_id}
 
         elapsed = time.time() - t_start
+
+        # 4.5 Layer 3 后处理: 位置冲突硬过滤 (互斥去重)
+        if action == "pick":
+            results = self._filter_pick_duplicates(results, ally_champs)
+        elif action == "ban":
+            results = self._filter_ban_duplicates(results, enemy_champs)
+
         log.info(f"[req={request_id}] recommend done, elapsed={elapsed:.3f}s, fallback={is_fallback}, n_results={len(results)}")
 
         # 5. 返回推荐结果
@@ -450,6 +494,161 @@ class BPRecommendationBackend:
             }
         }
 
+    def check_comp_feasibility(self, current_champs, candidate_cid, min_prob=0.10):
+        """
+        检查将 candidate_cid 加入 current_champs 后，是否能凑出合法的各司其职的阵容。
+        使用二分图最大匹配 (匈牙利算法)。
+
+        Args:
+            current_champs: 己方已选英雄列表
+            candidate_cid: 待推荐的候选英雄
+            min_prob: 认为该英雄能打该位置的最低概率门槛 (低于此概率视为完全不能打)
+
+        Returns:
+            bool: True 表示不冲突，可以分配；False 表示扎堆导致死锁
+        """
+        test_roster = current_champs + [candidate_cid]
+        n_heroes = len(test_roster)
+        if n_heroes == 0:
+            return True
+
+        # 1. 构建邻接表: 记录每个英雄可以打的位置 [0, 1, 2, 3, 4]
+        hero_possible_roles = []
+        for cid in test_roster:
+            if cid < 0 or cid >= len(self.store.pos_prior):
+                # 越界英雄视为全能 (兜底)
+                hero_possible_roles.append([0, 1, 2, 3, 4])
+                continue
+            pos_prior = self.store.pos_prior[cid]
+            roles = [i for i, prob in enumerate(pos_prior) if float(prob) >= min_prob]
+            # 若无任何位置 >= min_prob (如全零英雄)，视为全能避免误杀
+            if not roles:
+                roles = [0, 1, 2, 3, 4]
+            hero_possible_roles.append(roles)
+
+        # 2. 匈牙利算法 DFS 匹配
+        role_match = {}  # role_idx -> hero_idx
+
+        def dfs(hero_idx, visited_roles):
+            for role in hero_possible_roles[hero_idx]:
+                if role not in visited_roles:
+                    visited_roles.add(role)
+                    if role not in role_match or dfs(role_match[role], visited_roles):
+                        role_match[role] = hero_idx
+                        return True
+            return False
+
+        matches = 0
+        for i in range(n_heroes):
+            if dfs(i, set()):
+                matches += 1
+
+        # 最大匹配数等于英雄总数 => 可以排开，无死锁
+        return matches == n_heroes
+
+    def _filter_pick_duplicates(self, results, ally_champs, top_k=50):
+        """Layer 3: 己方 Pick 推荐列表过滤器。
+
+        双重拦截:
+        1. 硬英雄位置冲突: 己方已选硬英雄 (>= HARD_HERO_THRESHOLD) 某位置，同位置硬英雄直接剔除
+        2. 阵容可行性校验: 用匈牙利算法检查加入候选后是否能合法分配 K 个位置，防摇摆英雄扎堆死锁
+
+        注意: 列表内部不去重，允许推荐多个同位置硬英雄供用户选择。
+        """
+        HARD_THRESH = self.store.HARD_HERO_THRESHOLD
+
+        # 1. 记录己方已有阵容的纯硬位置
+        occupied_hard_positions = set()
+        for c in ally_champs:
+            best_pos, _, is_hard = self.store.analyze_hero_pos_type(c, HARD_THRESH)
+            if is_hard:
+                occupied_hard_positions.add(best_pos)
+
+        # 预计算己方位置占用（循环外一次，避免重复累加）
+        ally_pos_sum = np.zeros(5, dtype=np.float32)
+        ally_primary_counts = np.zeros(5, dtype=np.int32)
+        for c in ally_champs:
+            best_pos, _, _ = self.store.analyze_hero_pos_type(c, HARD_THRESH)
+            ally_primary_counts[best_pos] += 1
+            if 0 <= c < len(self.store.pos_prior):
+                ally_pos_sum += self.store.pos_prior[c]
+
+        # 2. 过滤: 硬英雄冲突 + 主位置拥挤 + 阵容可行性
+        filtered = []
+        n_filtered_hard = 0
+        n_filtered_flex = 0
+
+        for cid, score, rank in results:
+            best_pos, best_pos_prob, is_hard = self.store.analyze_hero_pos_type(cid, HARD_THRESH)
+
+            # 2a. 硬英雄位置冲突拦截 (防牛头+巴德)
+            if is_hard and best_pos in occupied_hard_positions:
+                n_filtered_hard += 1
+                continue
+
+            # 2a2. 主位置累计占用与生态位拥挤拦截
+            if len(ally_champs) > 0:
+                # 规则 1：不允许 3 个主位置相同
+                if ally_primary_counts[best_pos] >= 2:
+                    n_filtered_flex += 1
+                    continue
+                # 规则 2：概率累计期望拦截（阈值 2.0）
+                if best_pos_prob >= 0.4 and (ally_pos_sum[best_pos] + best_pos_prob > 2.0):
+                    n_filtered_flex += 1
+                    continue
+                # 规则 3：二分图可行性兜底
+                if not self.check_comp_feasibility(ally_champs, cid, min_prob=0.15):
+                    n_filtered_flex += 1
+                    continue
+
+            filtered.append((cid, score))
+            if len(filtered) >= top_k:
+                break
+
+        if n_filtered_hard > 0 or n_filtered_flex > 0:
+            log.info(f"  Pick position filter: {n_filtered_hard} hard, {n_filtered_flex} flex deadlocks filtered out")
+
+        return [(cid, score, new_rank + 1) for new_rank, (cid, score) in enumerate(filtered)]
+
+    def _filter_ban_duplicates(self, results, enemy_champs, top_k=50):
+        """Layer 3: 敌方 Ban 推荐列表过滤器。
+
+        规则: 若敌方阵容里已经选了纯硬英雄 (prob >= HARD_HERO_THRESHOLD) 某位置，
+        敌方该位置需求已被封死，后续所有该位置的纯硬英雄 Ban 选项直接剔除。
+        注意：Ban 列表内部【不需要】去重，因为集中 Ban 某一位置（如封锁上单池）是合理战术。
+        """
+        HARD_THRESH = self.store.HARD_HERO_THRESHOLD
+
+        # 1. 记录敌方已选阵容的纯硬位置 (敌方选了诺手 -> 敌方 Top 位饱合)
+        enemy_filled_positions = set()
+        for c in enemy_champs:
+            best_pos, _, is_hard = self.store.analyze_hero_pos_type(c, HARD_THRESH)
+            if is_hard:
+                enemy_filled_positions.add(best_pos)
+
+        # 2. 仅过滤与敌方已确定位置冲突的候选，不限制推荐列表内部的重复
+        filtered = []
+        n_filtered = 0
+
+        for cid, score, rank in results:
+            best_pos, _, is_hard = self.store.analyze_hero_pos_type(cid, HARD_THRESH)
+
+            if is_hard:
+                # 冲突拦截: 敌方已经选了该位置纯硬英雄，无需再浪费 Ban 位
+                if best_pos in enemy_filled_positions:
+                    n_filtered += 1
+                    continue
+                # 注意: Ban 列表内部不去重，集中 Ban 某一位置是合理战术
+
+            filtered.append((cid, score))
+            if len(filtered) >= top_k:
+                break
+
+        if n_filtered > 0:
+            log.info(f"  Ban position filter: {n_filtered} hard heroes filtered out to avoid wasted bans")
+
+        return [(cid, score, new_rank + 1) for new_rank, (cid, score) in enumerate(filtered)]
+
     def _run_inference(self, action, step, ally_champs, enemy_champs,
                        ally_pids, enemy_pids, cand_np, mask_np, last_ally_pos, position,
                        bp_seq_ids, global_context, unavail_set):
@@ -461,13 +660,13 @@ class BPRecommendationBackend:
         with self._inference_semaphore:
             if action == "pick":
                 if self.fallback_manager is not None:
+                    prev_fallback_count = self.fallback_manager._fallback_count
                     results = self.fallback_manager.predict_pick(
                         bp_seq_ids, ally_champs, enemy_champs, unavail_set,
                         global_context, cand_np, mask_np, step, last_ally_pos,
                         position=position, ally_pids=ally_pids, enemy_pids=enemy_pids,
                     )
-                    is_fallback = self.fallback_manager._fallback_count > getattr(self, "_last_fallback_count", 0)
-                    self._last_fallback_count = self.fallback_manager._fallback_count
+                    is_fallback = self.fallback_manager._fallback_count > prev_fallback_count
                     return results, is_fallback
                 else:
                     return self.recommender.predict_pick(
@@ -476,13 +675,13 @@ class BPRecommendationBackend:
                     ), False
             else:
                 if self.fallback_manager is not None:
+                    prev_fallback_count = self.fallback_manager._fallback_count
                     results = self.fallback_manager.predict_ban(
                         bp_seq_ids, ally_champs, enemy_champs, unavail_set,
                         global_context, cand_np, mask_np, step,
                         position=position, ally_pids=ally_pids, enemy_pids=enemy_pids,
                     )
-                    is_fallback = self.fallback_manager._fallback_count > getattr(self, "_last_fallback_count", 0)
-                    self._last_fallback_count = self.fallback_manager._fallback_count
+                    is_fallback = self.fallback_manager._fallback_count > prev_fallback_count
                     return results, is_fallback
                 else:
                     return self.recommender.predict_ban(
@@ -514,11 +713,18 @@ class BPRecommendationBackend:
                     if pos_name in POS_FULL and prob > 0.05:
                         pos_probs[POS_FULL[pos_name]] = round(prob, 3)
 
-            meta = self.store.meta_matrix[champ["idx"]]
-            display_pr = float(meta[0])
-            display_br = float(meta[1])
-            display_presence = float(meta[2])
-            display_wr = float(meta[3])
+            # 新英雄(如Locke)的idx可能超出meta_matrix范围，使用默认值兜底
+            if champ["idx"] < len(self.store.meta_matrix):
+                meta = self.store.meta_matrix[champ["idx"]]
+                display_pr = float(meta[0])
+                display_br = float(meta[1])
+                display_presence = float(meta[2])
+                display_wr = float(meta[3])
+            else:
+                display_pr = 0.0
+                display_br = 0.0
+                display_presence = 0.0
+                display_wr = 0.5
 
             display_stats = self._get_display_stats(name)
             if display_stats:
@@ -526,6 +732,17 @@ class BPRecommendationBackend:
                 display_br = display_stats["ban_rate"]
                 display_presence = display_stats["presence_rate"]
                 display_wr = display_stats["win_rate"]
+
+            # 为中间英雄池构建简短理由标签
+            pool_reasons = []
+            if display_wr > 0.55:
+                pool_reasons.append(f"版本强势({display_wr*100:.0f}%)")
+            elif display_wr > 0.4:
+                pool_reasons.append(f"高胜率({display_wr*100:.0f}%)")
+            if display_presence >= 0.2:
+                pool_reasons.append(f"高登场率({display_presence*100:.0f}%)")
+            if display_br > 0.2:
+                pool_reasons.append(f"高禁用率({display_br*100:.0f}%)")
 
             champion_list.append({
                 "name": name,
@@ -536,6 +753,7 @@ class BPRecommendationBackend:
                 "meta_ban_rate": round(display_br, 4),
                 "meta_presence": round(display_presence, 4),
                 "meta_win_rate": round(display_wr, 4),
+                "pool_reasons": pool_reasons,
             })
 
         champion_list.sort(key=lambda c: c["meta_presence"], reverse=True)
@@ -550,18 +768,30 @@ class BPRecommendationBackend:
         ally_filled_positions = set()
         ally_pos_sum = np.zeros(5, dtype=np.float32)
         for c in ally_champs:
-            pos_prior = self.store.pos_prior[c]
+            # 新英雄(如Locke)的idx可能超出pos_prior范围，使用均匀分布兜底
+            if c < len(self.store.pos_prior):
+                pos_prior = self.store.pos_prior[c]
+            else:
+                pos_prior = np.array([0.2, 0.2, 0.2, 0.2, 0.2], dtype=np.float32)
             ally_pos_sum += pos_prior
             best_pos_idx = int(np.argmax(pos_prior))
             best_pos = ["top", "jungle", "mid", "bot", "support"][best_pos_idx]
-            if float(pos_prior[best_pos_idx]) > 0.6:
+            # 展示层位置冲突判定与 Layer 1/3 阈值一致
+            if float(pos_prior[best_pos_idx]) >= self.store.HARD_HERO_THRESHOLD:
                 ally_filled_positions.add(best_pos)
 
         recommendations = []
         for cid, score, rank in results:
             name = self.idx_to_name.get(cid, "???")
-            meta = self.store.meta_matrix[cid]
-            pos_prior = self.store.pos_prior[cid]
+            # 新英雄(如Locke)的idx可能超出矩阵范围，使用默认值兜底
+            if cid < len(self.store.meta_matrix):
+                meta = self.store.meta_matrix[cid]
+            else:
+                meta = np.array([0.0, 0.0, 0.0, 0.5], dtype=np.float32)
+            if cid < len(self.store.pos_prior):
+                pos_prior = self.store.pos_prior[cid]
+            else:
+                pos_prior = np.array([0.2, 0.2, 0.2, 0.2, 0.2], dtype=np.float32)
 
             best_pos_idx = int(np.argmax(pos_prior))
             best_pos = ["top", "jungle", "mid", "bot", "support"][best_pos_idx]
@@ -611,16 +841,29 @@ class BPRecommendationBackend:
 
             reasons = []
             if action == "pick":
-                if assigned_pos_prob > 0.6:
+                # 位置适配判定与硬英雄阈值一致
+                if assigned_pos_prob >= self.store.HARD_HERO_THRESHOLD:
                     reasons.append(f"位置适配({pos_cn_name})")
                 elif pos_conflict:
                     reasons.append("战术摇摆")
-                if display_wr > 0.52: reasons.append(f"版本强势({display_wr*100:.0f}%)")
-                if display_presence > 0.3: reasons.append(f"高登场率({display_presence*100:.0f}%)")
+                # 胜率理由 (放宽至 >0.4, 让更多英雄有解释)
+                if display_wr > 0.55:
+                    reasons.append(f"版本强势({display_wr*100:.0f}%)")
+                elif display_wr > 0.4:
+                    reasons.append(f"高胜率({display_wr*100:.0f}%)")
+                # 登场率理由 (>=0.2 即视为高登场)
+                if display_presence >= 0.2:
+                    reasons.append(f"高登场率({display_presence*100:.0f}%)")
+                # 禁用率理由
+                if display_br > 0.2:
+                    reasons.append(f"高禁用率({display_br*100:.0f}%)")
             elif action == "ban":
                 if display_br > 0.2: reasons.append(f"高禁用率({display_br*100:.0f}%)")
-                if display_presence > 0.3: reasons.append(f"高登场率({display_presence*100:.0f}%)")
-                if display_wr > 0.52: reasons.append(f"高胜率({display_wr*100:.0f}%)")
+                if display_presence >= 0.2: reasons.append(f"高登场率({display_presence*100:.0f}%)")
+                if display_wr > 0.55:
+                    reasons.append(f"版本强势({display_wr*100:.0f}%)")
+                elif display_wr > 0.4:
+                    reasons.append(f"高胜率({display_wr*100:.0f}%)")
 
             rec["reasons"] = reasons
             recommendations.append(rec)

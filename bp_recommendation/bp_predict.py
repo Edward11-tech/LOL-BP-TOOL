@@ -5,7 +5,7 @@ bp_predict.py — 单场 BP 实时推荐
 模拟真实 BP 场景，用户输入当前 BP 状态和赛前信息，模型输出下一步的 Pick/Ban 推荐 Top-20。
 
 用法:
-    cd /Users/siwentu/Desktop/LOL analysis
+    cd <project_root>
     python -m bp_recommendation.bp_predict
 
 支持两种模式:
@@ -147,6 +147,7 @@ class PredictFeatureStore:
             load_champion_vocabulary(VOCAB_PATH)
         self.PAD_IDX = self.special_tokens["PAD"]
         self.UNK_IDX = self.special_tokens["UNK"]
+        self.role_token_start = self.champion_start_idx - 5
         cs = self.champion_start_idx
         ve = self.vocab_size
         self.n_champs = ve - cs
@@ -592,12 +593,69 @@ class PredictFeatureStore:
                     self.online_hot_streak[str(pid)] = hs_info
 
     def map_champ(self, name):
+        # empty_ban 在训练侧已归并到 UNK（vocab v2 移除 EMPTY_BAN，统一回退到 UNK_IDX）
         if not name or name.lower() == "nan" or name == "<EMPTY_BAN>":
             return self.UNK_IDX
         return self.name_to_idx.get(name, self.UNK_IDX)
 
-    def get_pick_candidate_matrix(self, side_str, ally_champs, enemy_champs, 
-                                  unavail_set,ally_pids, enemy_pids, target_step, 
+    # ====== 位置冲突三层防御体系 (2026-08-03) ======
+    # Layer 1: 英雄位置属性判定
+    HARD_HERO_THRESHOLD = 0.85
+
+    def analyze_hero_pos_type(self, cid, hard_threshold=None):
+        """判定英雄的位置类型: 纯硬英雄 vs 摇摆/非常规英雄。
+
+        Returns:
+            (best_pos_idx, best_pos_prob, is_hard_hero)
+            若 cid 越界返回 (None, 0.0, False)
+        """
+        if hard_threshold is None:
+            hard_threshold = self.HARD_HERO_THRESHOLD
+        if cid < 0 or cid >= len(self.pos_prior):
+            return None, 0.0, False
+        pos_prior = self.pos_prior[cid]
+        best_pos_idx = int(np.argmax(pos_prior))
+        best_pos_prob = float(pos_prior[best_pos_idx])
+        is_hard_hero = best_pos_prob >= hard_threshold
+        return best_pos_idx, best_pos_prob, is_hard_hero
+
+    def _compute_dynamic_role_fit_vectorized(self, cs, ve, pos_occupancy_sum):
+        """向量化动态 role_fit 计算。
+
+        - 纯硬英雄 (prob >= HARD_HERO_THRESHOLD): 采用 1.0 硬封顶，撞车直接归 0
+        - 摇摆英雄 (prob < HARD_HERO_THRESHOLD): 采用 1.2 软化基准，保留非常规选角弹性
+
+        Args:
+            cs: champion_start_idx
+            ve: vocab_size
+            pos_occupancy_sum: [5] 位置占用度向量 (ally_pos_sum 或 enemy_pos_sum)
+
+        Returns:
+            role_fit: [n_candidates] 动态 role_fit 值
+        """
+        n_cand = ve - cs
+        cand_pos_prior = self.pos_prior[cs:ve]  # [n_cand, 5]
+        best_pos_idx = np.argmax(cand_pos_prior, axis=1)  # [n_cand]
+        best_pos_prob = cand_pos_prior[np.arange(n_cand), best_pos_idx]  # [n_cand]
+        is_hard = best_pos_prob >= self.HARD_HERO_THRESHOLD  # [n_cand]
+
+        # 动态基准: 硬英雄 1.0, 摇摆英雄 1.2
+        soft_bases = np.where(is_hard, 1.0, 1.2)  # [n_cand]
+
+        # 各候选最佳位置的已占用度
+        best_pos_occ = pos_occupancy_sum[best_pos_idx]  # [n_cand]
+
+        # 动态衰减
+        role_fit = np.maximum(0.0, soft_bases - best_pos_occ)  # [n_cand]
+
+        # 纯硬英雄且位置已被完全占满 (>= HARD_HERO_THRESHOLD), 强行归零
+        role_fit = np.where(is_hard & (best_pos_occ >= self.HARD_HERO_THRESHOLD),
+                            0.0, role_fit)
+
+        return role_fit.astype(np.float32)
+
+    def get_pick_candidate_matrix(self, side_str, ally_champs, enemy_champs,
+                                  unavail_set,ally_pids, enemy_pids, target_step,
                                   team_name, opp_team, pre_unavail_list=None):
         """构建 Pick 候选矩阵 (CANDIDATE_DIM 维)
 
@@ -611,8 +669,12 @@ class PredictFeatureStore:
             self._candidate_cache.move_to_end(cache_key)
             return self._candidate_cache[cache_key]
 
-        cs = self.champion_start_idx
+        # 过滤超出模型词表范围的英雄索引(如新英雄Locke, idx >= vocab_size)
         ve = self.vocab_size
+        ally_champs = [c for c in ally_champs if c < ve]
+        enemy_champs = [c for c in enemy_champs if c < ve]
+
+        cs = self.champion_start_idx
         n_champs = self.n_champs
         FI = CANDIDATE_FEAT_MAP
 
@@ -623,7 +685,7 @@ class PredictFeatureStore:
         # Player features (支持 unknown 选手)
         # 使用 default_player_vec 初始化，防止纯 Draft 模式 KDA/WR 变 0
         ally_feat_mat = np.tile(self.default_player_vec, (5, n_champs, 1)).astype(np.float32)
-        
+
         for i, pid in enumerate(ally_pids[:5]):
             pmat = None
             if pid == "unknown":
@@ -640,7 +702,8 @@ class PredictFeatureStore:
         enemy_pos_sum = np.zeros(5, dtype=np.float32)
         for c in enemy_champs:
             enemy_pos_sum += self.pos_prior[c]
-        ally_missing_roles = np.clip(1.0 - ally_pos_sum, 0.0, 1.0)
+        # 软化系数 1.2: 位置已选时保留 20% 冗余，避免非常规分路英雄(如辅助位卡密尔)的 role_fit 归零
+        ally_missing_roles = np.clip(1.2 - ally_pos_sum, 0.0, 1.0)
         enemy_missing_roles = np.clip(1.0 - enemy_pos_sum, 0.0, 1.0)
 
         # 切片 4:11 包含全部 7 个 player 特征 (含 recent_games@7)
@@ -657,9 +720,9 @@ class PredictFeatureStore:
             cand[cs:ve, FI["enemy_synergy"]] = np.max(self.syn_mat[cs:ve, enemy_arr], axis=1)
 
         # Role fit
-        pos_block = cand[cs:ve, FI["pos_top"]:FI["pos_sup"]+1]
-        cand[cs:ve, FI["ally_role_fit"]] = pos_block @ ally_missing_roles
-        cand[cs:ve, FI["enemy_role_fit"]] = pos_block @ enemy_missing_roles
+        # Layer 2: 动态 role_fit — 硬英雄用 1.0 基准, 摇摆英雄用 1.2 基准
+        cand[cs:ve, FI["ally_role_fit"]] = self._compute_dynamic_role_fit_vectorized(cs, ve, ally_pos_sum)
+        cand[cs:ve, FI["enemy_role_fit"]] = self._compute_dynamic_role_fit_vectorized(cs, ve, enemy_pos_sum)
         cand[cs:ve, FI["is_pick"]] = 1.0
 
         # Enemy mastery (支持 unknown 选手)
@@ -715,17 +778,19 @@ class PredictFeatureStore:
 
         if pre_unavail_list is not None:
             for uid in pre_unavail_list:
+                uid = int(uid)
                 if cs <= uid < ve:
                     cand[uid, FI["is_fearless_banned"]] = 1.0
 
-        # Mask: 排除 special tokens (PAD/UNK/MASK/EMPTY_BAN) 和已用英雄
+        # Mask: 排除 special tokens (PAD/UNK) 和已用英雄
+        # 注: vocab v2.1 已移除 MASK 和 EMPTY_BAN，empty_ban 统一归并到 UNK
         mask = np.ones(self.vocab_size, dtype=np.float32)
         mask[:cs] = 0.0
-        # 排除 EMPTY_BAN 等落在 champion 区间的 special token
         for sp_idx in self.special_tokens.values():
             if 0 <= sp_idx < self.vocab_size:
                 mask[sp_idx] = 0.0
         for uid in unavail_set:
+            uid = int(uid)
             if 0 <= uid < self.vocab_size:
                 mask[uid] = 0.0
 
@@ -750,8 +815,12 @@ class PredictFeatureStore:
             self._candidate_cache.move_to_end(cache_key)
             return self._candidate_cache[cache_key]
 
-        cs = self.champion_start_idx
+        # 过滤超出模型词表范围的英雄索引(如新英雄Locke, idx >= vocab_size)
         ve = self.vocab_size
+        ally_champs = [c for c in ally_champs if c < ve]
+        enemy_champs = [c for c in enemy_champs if c < ve]
+
+        cs = self.champion_start_idx
         n_champs = self.n_champs
         curr_side_code = 0 if side_str == "blue" else 1
         FI = CANDIDATE_FEAT_MAP
@@ -780,7 +849,8 @@ class PredictFeatureStore:
         enemy_pos_sum = np.zeros(5, dtype=np.float32)
         for c in enemy_champs:
             enemy_pos_sum += self.pos_prior[c]
-        ally_missing_roles = np.clip(1.0 - ally_pos_sum, 0.0, 1.0)
+        # 软化系数 1.2: 位置已选时保留 20% 冗余，避免非常规分路英雄(如辅助位卡密尔)的 role_fit 归零
+        ally_missing_roles = np.clip(1.2 - ally_pos_sum, 0.0, 1.0)
         enemy_missing_roles = np.clip(1.0 - enemy_pos_sum, 0.0, 1.0)
 
         # 切片 4:11 包含全部 7 个 player 特征 (含 recent_games@7)
@@ -797,9 +867,9 @@ class PredictFeatureStore:
             cand[cs:ve, FI["enemy_synergy"]] = np.max(self.syn_mat[cs:ve, enemy_arr], axis=1)
 
         # Role fit
-        pos_block = cand[cs:ve, FI["pos_top"]:FI["pos_sup"]+1]
-        cand[cs:ve, FI["ally_role_fit"]] = pos_block @ ally_missing_roles
-        cand[cs:ve, FI["enemy_role_fit"]] = pos_block @ enemy_missing_roles
+        # Layer 2: 动态 role_fit — 硬英雄用 1.0 基准, 摇摆英雄用 1.2 基准
+        cand[cs:ve, FI["ally_role_fit"]] = self._compute_dynamic_role_fit_vectorized(cs, ve, ally_pos_sum)
+        cand[cs:ve, FI["enemy_role_fit"]] = self._compute_dynamic_role_fit_vectorized(cs, ve, enemy_pos_sum)
 
         # is_pick flag
         cand[cs:ve, FI["is_pick"]] = 0.0  # ban 步骤
@@ -859,16 +929,19 @@ class PredictFeatureStore:
         # 注意: ban 模型不使用 last_ally_synergy@idx30（与训练时 use_extended_features=False 一致），idx30 保持为 0
         if pre_unavail_list is not None:
             for uid in pre_unavail_list:
+                uid = int(uid)
                 if cs <= uid < ve:
                     cand[uid, FI["is_fearless_banned"]] = 1.0
 
-        # Mask: 排除 special tokens (PAD/UNK/MASK/EMPTY_BAN) 和已用英雄
+        # Mask: 排除 special tokens (PAD/UNK) 和已用英雄
+        # 注: vocab v2.1 已移除 MASK 和 EMPTY_BAN，empty_ban 统一归并到 UNK
         mask = np.ones(self.vocab_size, dtype=np.float32)
         mask[:cs] = 0.0
         for sp_idx in self.special_tokens.values():
             if 0 <= sp_idx < self.vocab_size:
                 mask[sp_idx] = 0.0
         for uid in unavail_set:
+            uid = int(uid)
             if 0 <= uid < self.vocab_size:
                 mask[uid] = 0.0
 
@@ -1026,7 +1099,6 @@ class BPRecommender:
         self.store = PredictFeatureStore()
         self._load_pick_models()
         self._load_ban_models()
-        # 初始化特征监控器（PSI 基线可选）
         baseline_dir = os.path.join(RECO_DIR, "features")
         self.feature_monitor = FeatureMonitor(baseline_dir=baseline_dir)
         log.info("All models loaded.")
@@ -1036,13 +1108,14 @@ class BPRecommender:
         return DEVICE
 
     def _load_pick_models(self):
-        # CS Transformer
+        vocab_size = self.store.vocab_size
+        role_token_start = self.store.role_token_start
         cs_ckpt = torch.load(os.path.join(PICK_CKPT_DIR, "best_model_cs.pt"),
                              map_location=DEVICE, weights_only=False)
         self.pick_ctx_dim = cs_ckpt.get("context_dim", 15)
         cs_params = _infer_pick_params_from_state(cs_ckpt["model_state_dict"])
         self.pick_cs_model = BPTacticalTransformerPick(
-            vocab_size=self.store.vocab_size, context_dim=self.pick_ctx_dim,
+            vocab_size=vocab_size, context_dim=self.pick_ctx_dim,
             candidate_dim=cs_params.get("candidate_dim", cs_ckpt.get("candidate_dim", CANDIDATE_DIM)),
             h_dim=cs_params.get("h_dim", 384),
             c_dim=cs_params.get("c_dim", 128),
@@ -1053,19 +1126,18 @@ class BPRecommender:
             tactical_hidden=cs_ckpt.get("tactical_hidden", 256),
             dropout=cs_ckpt.get("dropout", 0.052),
             attention_dropout=cs_ckpt.get("attention_dropout", 0.106),
+            role_token_start=role_token_start,
         ).to(DEVICE)
         self.pick_cs_model.load_state_dict(cs_ckpt["model_state_dict"])
         self.pick_cs_model.eval()
-        # 释放 checkpoint 字典，降低峰值内存
         del cs_ckpt
-        # NoCS Transformer
         nocs_path = os.path.join(PICK_CKPT_DIR, "best_model_nocs.pt")
         self.pick_nocs_model = None
         if os.path.exists(nocs_path):
             nocs_ckpt = torch.load(nocs_path, map_location=DEVICE, weights_only=False)
             nocs_params = _infer_pick_params_from_state(nocs_ckpt["model_state_dict"])
             self.pick_nocs_model = BPTacticalTransformerPick(
-                vocab_size=self.store.vocab_size,
+                vocab_size=vocab_size,
                 context_dim=nocs_ckpt.get("context_dim", self.pick_ctx_dim),
                 candidate_dim=nocs_params.get("candidate_dim", nocs_ckpt.get("candidate_dim", CANDIDATE_DIM)),
                 h_dim=nocs_params.get("h_dim", 384),
@@ -1077,6 +1149,7 @@ class BPRecommender:
                 tactical_hidden=nocs_ckpt.get("tactical_hidden", 256),
                 dropout=nocs_ckpt.get("dropout", 0.198),
                 attention_dropout=nocs_ckpt.get("attention_dropout", 0.114),
+                role_token_start=role_token_start,
             ).to(DEVICE)
             self.pick_nocs_model.load_state_dict(nocs_ckpt["model_state_dict"])
             self.pick_nocs_model.eval()
@@ -1106,27 +1179,26 @@ class BPRecommender:
             self.scaler = pickle.load(f)
 
     def _load_ban_models(self):
-        # Ban Transformer
+        vocab_size = self.store.vocab_size
         ban_ckpt = torch.load(os.path.join(BAN_CKPT_DIR, "best_model_cs.pt"),
                               map_location=DEVICE, weights_only=False)
         self.ban_ctx_dim = ban_ckpt.get("context_dim", BAN_CONTEXT_DIM)
         ban_params = _infer_ban_params_from_state(ban_ckpt["model_state_dict"])
         self.ban_model = BPTacticalTransformerBan(
-            vocab_size=self.store.vocab_size, context_dim=self.ban_ctx_dim,
+            vocab_size=vocab_size, context_dim=self.ban_ctx_dim,
             candidate_dim=ban_params.get("candidate_dim", ban_ckpt.get("candidate_dim", CANDIDATE_DIM)),
         ).to(DEVICE)
         self.ban_model.load_state_dict(ban_ckpt["model_state_dict"])
         self.ban_model.eval()
         del ban_ckpt
 
-        # Ban NoCS (外部 mask CS 特征)
         ban_nocs_path = os.path.join(BAN_CKPT_DIR, "best_model_nocs.pt")
         self.ban_nocs_model = None
         if os.path.exists(ban_nocs_path):
             nocs_ckpt = torch.load(ban_nocs_path, map_location=DEVICE, weights_only=False)
             nocs_params = _infer_ban_params_from_state(nocs_ckpt["model_state_dict"])
             self.ban_nocs_model = BPTacticalTransformerBan(
-                vocab_size=self.store.vocab_size,
+                vocab_size=vocab_size,
                 context_dim=nocs_ckpt.get("context_dim", self.ban_ctx_dim),
                 candidate_dim=nocs_params.get("candidate_dim", nocs_ckpt.get("candidate_dim", CANDIDATE_DIM)),
             ).to(DEVICE)
@@ -1195,12 +1267,11 @@ class BPRecommender:
                      global_context, cand_np, mask_np, target_step, last_ally_pos):
         """Pick 推荐: 返回 [(champion_idx, score, rank), ...]"""
         cs = self.store.champion_start_idx
+        ve = self.store.vocab_size
 
-        # === 断言 1: 确保输入的候选矩阵和掩码物理长度对齐 ===
         assert cand_np.shape[0] == mask_np.shape[0] == self.store.vocab_size, \
             f"候选矩阵与掩码维度不匹配! cand: {cand_np.shape}, mask: {mask_np.shape}, vocab: {self.store.vocab_size}"
 
-        # === 断言 2: 确保已Pick/Ban的英雄绝不会出现在有效候选集里 ===
         already_selected = set(ally_champs) | set(enemy_champs) | set(unavail_set)
         valid_mask_check = mask_np > 0.5
         valid_cids_check = np.where(valid_mask_check)[0]
@@ -1208,7 +1279,6 @@ class BPRecommender:
         leaked = [cid for cid in valid_cids_check if cid in already_selected]
         assert len(leaked) == 0, f"候选集包含已选/已禁英雄! 泄露英雄IDs: {leaked}"
 
-        # 特征监控：推理前校验特征完整性与范围
         if hasattr(self, 'feature_monitor') and self.feature_monitor is not None:
             integrity_result = self.feature_monitor.validate_feature_integrity(
                 cand_np, np.asarray(global_context), mask_np,
@@ -1223,7 +1293,6 @@ class BPRecommender:
             if not range_gc.is_valid:
                 log.warning(f"Global context range check failed: {range_gc.violations}")
 
-        # 推理特征日志 (供周度 PSI 漂移分析，失败不影响主业务)
         try:
             from common.inference_feature_logger import log_recommendation_features
             import uuid as _uuid
@@ -1235,10 +1304,10 @@ class BPRecommender:
                 request_id=_uuid.uuid4().hex[:12],
             )
         except Exception:
-            pass  # 埋点失败不能影响主业务
+            pass
 
-        # Transformer 推理
-        bp_padded = np.array(bp_seq_ids + [self.store.PAD_IDX] * (20 - len(bp_seq_ids)), dtype=np.int64)
+        bp_seq_safe = [min(uid, ve - 1) if uid >= ve else uid for uid in bp_seq_ids]
+        bp_padded = np.array(bp_seq_safe + [self.store.PAD_IDX] * (20 - len(bp_seq_safe)), dtype=np.int64)
         bp_t = torch.as_tensor(bp_padded[np.newaxis, :], dtype=torch.long, device=DEVICE)
         ctx_t = torch.as_tensor(np.array([global_context], dtype=np.float32), device=DEVICE)
         cand_t = torch.as_tensor(np.array([cand_np], dtype=np.float32), device=DEVICE)
@@ -1256,17 +1325,14 @@ class BPRecommender:
             else:
                 nocs_logits_raw = cs_logits_raw
 
-        # 【核心大修 1】：彻底屏蔽幽灵英雄！把 mask 为 0 的位置设为 -1e9
         cs_logits = cs_logits_raw.copy()
         cs_logits[mask_np == 0] = -1e9
         nocs_logits = nocs_logits_raw.copy()
         nocs_logits[mask_np == 0] = -1e9
 
-        # Cascade
         valid_cids = np.where(mask_np > 0.5)[0]
         valid_cids = valid_cids[valid_cids >= cs]
         
-        # 【核心大修 2】：获取真实的可用英雄总数（约 150），对齐特征量纲
         total_valid = len(valid_cids)
 
         top_k_limit = min(50, total_valid)
@@ -1275,8 +1341,8 @@ class BPRecommender:
         eval_cids = valid_cids[top_k_local_indices]
         total_eval = len(eval_cids)
         
-        cs_gf = self._compute_group_features(cs_logits, mask_np, cs, self.store.vocab_size)
-        nocs_gf = self._compute_group_features(nocs_logits, mask_np, cs, self.store.vocab_size)
+        cs_gf = self._compute_group_features(cs_logits, mask_np, cs, ve)
+        nocs_gf = self._compute_group_features(nocs_logits, mask_np, cs, ve)
 
         X_arr = _build_feature_matrix_batch(
             cs_logits[eval_cids], cs_gf["rank_map"][eval_cids], cs_gf,
@@ -1284,7 +1350,6 @@ class BPRecommender:
             cand_np[eval_cids], total_valid, total_eval, target_step,
         )
 
-        # === 断言 3: 确保精排输入的样本数与粗排Logit的行数绝对一致 ===
         assert len(X_arr) == len(eval_cids) == total_eval, \
             f"粗排Logit与精排特征行数错位! X_arr: {len(X_arr)}, eval_cids: {len(eval_cids)}, total_eval: {total_eval}"
         assert X_arr.shape[1] == len(FEATURE_COLS), \
@@ -1296,25 +1361,19 @@ class BPRecommender:
             lgb_preds += m.predict(X_scaled)
         lgb_preds /= max(len(self.lgb_models), 1)
 
-        # 【修复 3】：残差模式下，最终分数 = LGBM 残差 + TF base logits
-        # 模型训练时 init_score=base_cs，所以预测时需要加回 base_cs
         if getattr(self, "pick_fusion_mode", "blend") == "residual_init_score":
             blend_scores = lgb_preds + cs_logits[eval_cids]
         else:
             cs_rn = self._rank_normalize(cs_logits[eval_cids])
             lgb_rn = self._rank_normalize(lgb_preds)
             blend_scores = self.pick_blend_alpha * cs_rn + (1.0 - self.pick_blend_alpha) * lgb_rn
-        
-        # 【核心大修 3】：已彻底删除 blend_scores -= 0.5 的外挂位置惩罚，交由模型自行决策。
 
-        # 排序输出
         sorted_idx = np.argsort(-blend_scores)
         results = []
-        # for rank, si in enumerate(sorted_idx[:20]):  comment for alignment test
         for rank, si in enumerate(sorted_idx):
             cid = eval_cids[si]
             results.append((cid, float(blend_scores[si]), rank + 1))
-            
+
         return results
     
 
@@ -1322,12 +1381,11 @@ class BPRecommender:
                     global_context, cand_np, mask_np, target_step):
         """Ban 推荐: 返回 [(champion_idx, score, rank), ...]"""
         cs = self.store.champion_start_idx
+        ve = self.store.vocab_size
 
-        # === 断言 1: 确保输入的候选矩阵和掩码物理长度对齐 ===
         assert cand_np.shape[0] == mask_np.shape[0] == self.store.vocab_size, \
             f"[Ban] 候选矩阵与掩码维度不匹配! cand: {cand_np.shape}, mask: {mask_np.shape}, vocab: {self.store.vocab_size}"
 
-        # === 断言 2: 确保已Pick/Ban的英雄绝不会出现在有效候选集里 ===
         already_selected = set(ally_champs) | set(enemy_champs) | set(unavail_set)
         valid_mask_check = mask_np > 0.5
         valid_cids_check = np.where(valid_mask_check)[0]
@@ -1335,7 +1393,6 @@ class BPRecommender:
         leaked = [cid for cid in valid_cids_check if cid in already_selected]
         assert len(leaked) == 0, f"[Ban] 候选集包含已选/已禁英雄! 泄露英雄IDs: {leaked}"
 
-        # 特征监控：推理前校验特征完整性与范围
         if hasattr(self, 'feature_monitor') and self.feature_monitor is not None:
             integrity_result = self.feature_monitor.validate_feature_integrity(
                 cand_np, np.asarray(global_context), mask_np,
@@ -1347,7 +1404,6 @@ class BPRecommender:
             if not range_cm.is_valid:
                 log.warning(f"[Ban] Candidate matrix range check failed: {range_cm.violations}")
 
-        # 推理特征日志 (供周度 PSI 漂移分析，失败不影响主业务)
         try:
             from common.inference_feature_logger import log_recommendation_features
             import uuid as _uuid
@@ -1359,10 +1415,10 @@ class BPRecommender:
                 request_id=_uuid.uuid4().hex[:12],
             )
         except Exception:
-            pass  # 埋点失败不能影响主业务
+            pass
 
-        # Transformer 推理
-        bp_padded = np.array(bp_seq_ids + [self.store.PAD_IDX] * (20 - len(bp_seq_ids)), dtype=np.int64)
+        bp_seq_safe = [min(uid, ve - 1) if uid >= ve else uid for uid in bp_seq_ids]
+        bp_padded = np.array(bp_seq_safe + [self.store.PAD_IDX] * (20 - len(bp_seq_safe)), dtype=np.int64)
         bp_t = torch.as_tensor(bp_padded[np.newaxis, :], dtype=torch.long, device=DEVICE)
         ctx_t = torch.as_tensor(np.array([global_context], dtype=np.float32), device=DEVICE)
         cand_t = torch.as_tensor(np.array([cand_np], dtype=np.float32), device=DEVICE)
@@ -1372,22 +1428,20 @@ class BPRecommender:
         for i in range(min(len(bp_seq_ids), 20)):
             cid = bp_seq_ids[i]
             if cid >= cs and BP_SEQUENCE[i][0] == "pick":
-                hist_pos[i] = int(np.argmax(self.store.pos_prior[cid]))
+                if cid < self.store.pos_prior.shape[0]:
+                    hist_pos[i] = int(np.argmax(self.store.pos_prior[cid]))
         hist_t = torch.as_tensor(np.array([hist_pos], dtype=np.int64), dtype=torch.long, device=DEVICE)
 
         with torch.no_grad():
             cs_logits_raw = self.ban_model(bp_t, ctx_t, cand_t, mask_t,
                                        history_positions=hist_t)["logits"].squeeze(0).cpu().numpy()
 
-        # 【核心大修 1】：屏蔽幽灵英雄
         cs_logits = cs_logits_raw.copy()
         cs_logits[mask_np == 0] = -1e9
 
-        # Cascade (Unified 单模型)
         valid_cids = np.where(mask_np > 0.5)[0]
         valid_cids = valid_cids[valid_cids >= cs]
         
-        # 【核心大修 2】：传入真实的英雄总数对齐量纲
         total_valid = len(valid_cids)
 
         top_k_limit = min(50, total_valid)
@@ -1396,14 +1450,13 @@ class BPRecommender:
         eval_cids = valid_cids[top_k_local_indices]
         total_eval = len(eval_cids)
 
-        cs_gf = _compute_ban_group_features(cs_logits, mask_np, cs, self.store.vocab_size)
+        cs_gf = _compute_ban_group_features(cs_logits, mask_np, cs, ve)
 
         X_arr = _build_ban_feature_matrix_batch(
             cs_logits[eval_cids], cs_gf["rank_map"][eval_cids], cs_gf,
             cand_np[eval_cids], total_valid, 
         )
 
-        # === 断言 3: 确保精排输入的样本数与粗排Logit的行数绝对一致 ===
         assert len(X_arr) == len(eval_cids) == total_eval, \
             f"[Ban] 粗排Logit与精排特征行数错位! X_arr: {len(X_arr)}, eval_cids: {len(eval_cids)}, total_eval: {total_eval}"
         assert X_arr.shape[1] == len(BAN_FEATURE_COLS), \
@@ -1421,10 +1474,10 @@ class BPRecommender:
 
         sorted_idx = np.argsort(-final_scores)
         results = []
-        # for rank, si in enumerate(sorted_idx[:20]):  comment for alignment test
         for rank, si in enumerate(sorted_idx):
             cid = eval_cids[si]
             results.append((cid, float(final_scores[si]), rank + 1))
+
         return results
 
 
@@ -1460,6 +1513,135 @@ def print_bp_board(completed_steps, bp_seq_ids, store):
     log.info(f"  Blue Picks: {', '.join(blue_picks) if blue_picks else '(none)'}")
     log.info(f"  Red Picks:  {', '.join(red_picks) if red_picks else '(none)'}")
     log.info("=" * 60)
+
+
+def _check_comp_feasibility_cli(store, current_champs, candidate_cid, min_prob=0.10):
+    """CLI 版阵容可行性校验 (匈牙利算法最大二分匹配)。
+
+    与 BPRecommendationBackend.check_comp_feasibility 逻辑一致。
+    """
+    test_roster = current_champs + [candidate_cid]
+    n_heroes = len(test_roster)
+    if n_heroes == 0:
+        return True
+
+    hero_possible_roles = []
+    for cid in test_roster:
+        if cid < 0 or cid >= len(store.pos_prior):
+            hero_possible_roles.append([0, 1, 2, 3, 4])
+            continue
+        pos_prior = store.pos_prior[cid]
+        roles = [i for i, prob in enumerate(pos_prior) if float(prob) >= min_prob]
+        if not roles:
+            roles = [0, 1, 2, 3, 4]
+        hero_possible_roles.append(roles)
+
+    role_match = {}
+
+    def dfs(hero_idx, visited_roles):
+        for role in hero_possible_roles[hero_idx]:
+            if role not in visited_roles:
+                visited_roles.add(role)
+                if role not in role_match or dfs(role_match[role], visited_roles):
+                    role_match[role] = hero_idx
+                    return True
+        return False
+
+    matches = 0
+    for i in range(n_heroes):
+        if dfs(i, set()):
+            matches += 1
+
+    return matches == n_heroes
+
+
+def _filter_pick_duplicates_cli(results, store, ally_champs, top_k=50):
+    """CLI 版 Layer 3: 己方 Pick 位置冲突过滤。
+
+    与 BPRecommendationBackend._filter_pick_duplicates 逻辑一致:
+    1. 硬英雄位置冲突拦截
+    2. 阵容可行性校验 (匈牙利算法)
+    """
+    HARD_THRESH = store.HARD_HERO_THRESHOLD
+
+    occupied_hard_positions = set()
+    for c in ally_champs:
+        best_pos, _, is_hard = store.analyze_hero_pos_type(c, HARD_THRESH)
+        if is_hard:
+            occupied_hard_positions.add(best_pos)
+
+    ally_pos_sum = np.zeros(5, dtype=np.float32)
+    ally_primary_counts = np.zeros(5, dtype=np.int32)
+    for c in ally_champs:
+        best_pos, _, _ = store.analyze_hero_pos_type(c, HARD_THRESH)
+        ally_primary_counts[best_pos] += 1
+        if 0 <= c < len(store.pos_prior):
+            ally_pos_sum += store.pos_prior[c]
+
+    filtered = []
+    n_filtered_hard = 0
+    n_filtered_flex = 0
+
+    for cid, score, rank in results:
+        best_pos, best_pos_prob, is_hard = store.analyze_hero_pos_type(cid, HARD_THRESH)
+
+        if is_hard and best_pos in occupied_hard_positions:
+            n_filtered_hard += 1
+            continue
+
+        if ally_champs:
+            if ally_primary_counts[best_pos] >= 2:
+                n_filtered_flex += 1
+                continue
+            if best_pos_prob >= 0.4 and (ally_pos_sum[best_pos] + best_pos_prob > 2.0):
+                n_filtered_flex += 1
+                continue
+            if not _check_comp_feasibility_cli(store, ally_champs, cid, min_prob=0.15):
+                n_filtered_flex += 1
+                continue
+
+        filtered.append((cid, score))
+        if len(filtered) >= top_k:
+            break
+
+    if n_filtered_hard > 0 or n_filtered_flex > 0:
+        log.info(f"  [CLI] Pick position filter: {n_filtered_hard} hard, {n_filtered_flex} flex deadlocks filtered out")
+
+    return [(cid, score, new_rank + 1) for new_rank, (cid, score) in enumerate(filtered)]
+
+
+def _filter_ban_duplicates_cli(results, store, enemy_champs, top_k=50):
+    """CLI 版 Layer 3: 敌方 Ban 位置冲突过滤。
+
+    与 BPRecommendationBackend._filter_ban_duplicates 逻辑一致，
+    仅过滤与敌方已选硬英雄位置冲突的候选，列表内部不去重。
+    """
+    HARD_THRESH = store.HARD_HERO_THRESHOLD
+
+    enemy_filled_positions = set()
+    for c in enemy_champs:
+        best_pos, _, is_hard = store.analyze_hero_pos_type(c, HARD_THRESH)
+        if is_hard:
+            enemy_filled_positions.add(best_pos)
+
+    if not enemy_filled_positions:
+        return results
+
+    filtered = []
+    n_filtered = 0
+    for cid, score, rank in results:
+        best_pos, _, is_hard = store.analyze_hero_pos_type(cid, HARD_THRESH)
+        if is_hard and best_pos in enemy_filled_positions:
+            n_filtered += 1
+            continue
+        filtered.append((cid, score))
+        if len(filtered) >= top_k:
+            break
+
+    if n_filtered > 0:
+        log.info(f"  [CLI] Ban position filter: {n_filtered} hard heroes filtered out to avoid wasted bans")
+
+    return [(cid, score, new_rank + 1) for new_rank, (cid, score) in enumerate(filtered)]
 
 
 def interactive_predict():
@@ -1649,6 +1831,8 @@ def interactive_predict():
                 bp_seq_ids, ally_champs, enemy_champs, unavail_set,
                 global_context, cand_np, mask_np, step, last_ally_pos,
             )
+            # Layer 3: 位置冲突过滤 (与 Web 后端 recommend() 保持一致)
+            results = _filter_pick_duplicates_cli(results, store, ally_champs)
         else:
             cand_np, mask_np = store.get_ban_candidate_matrix(
                 side, ally_champs, enemy_champs, unavail_set,
@@ -1658,6 +1842,8 @@ def interactive_predict():
                 bp_seq_ids, ally_champs, enemy_champs, unavail_set,
                 global_context, cand_np, mask_np, step,
             )
+            # Layer 3: 位置冲突过滤 (与 Web 后端 recommend() 保持一致)
+            results = _filter_ban_duplicates_cli(results, store, enemy_champs)
 
         log.info("")
         log.info(f"  Top-20 {action_cn} 推荐:")

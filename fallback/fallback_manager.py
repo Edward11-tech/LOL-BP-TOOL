@@ -128,14 +128,28 @@ class FallbackManager:
 
         # 3. 走深度网络推理
         try:
+            # === Legacy v1 兼容: 翻译输入到 legacy idx ===
+            recommender = self.recommender
+            if getattr(recommender, 'legacy_mode', False):
+                _bp_seq = recommender._translate_bp_seq_to_legacy(bp_seq_ids)
+                _cand_np, _mask_np = recommender._translate_cand_to_legacy(cand_np, mask_np)
+                _cs = 3  # legacy v1 champion_start_idx
+                _ve = recommender.legacy_vocab_size
+            else:
+                _bp_seq = bp_seq_ids
+                _cand_np = cand_np
+                _mask_np = mask_np
+                _cs = self.store.champion_start_idx
+                _ve = self.store.vocab_size
+
             # Transformer 推理
-            cs = self.store.champion_start_idx
-            bp_padded = bp_seq_ids + [self.store.PAD_IDX] * (20 - len(bp_seq_ids))
-            bp_t = self._to_tensor([bp_padded], dtype="long")
+            cs = _cs
+            bp_padded = _bp_seq + [self.store.PAD_IDX] * (20 - len(_bp_seq))
+            bp_t = self._to_tensor(np.array([bp_padded], dtype=np.int64), dtype="long")
             ctx_t = self._to_tensor(np.array([global_context], dtype=np.float32))
-            cand_t = self._to_tensor(np.array([cand_np], dtype=np.float32))
-            mask_t = self._to_tensor(np.array([mask_np], dtype=np.float32))
-            lap_t = self._to_tensor([last_ally_pos], dtype="long")
+            cand_t = self._to_tensor(np.array([_cand_np], dtype=np.float32))
+            mask_t = self._to_tensor(np.array([_mask_np], dtype=np.float32))
+            lap_t = self._to_tensor(np.array([last_ally_pos], dtype=np.int64), dtype="long")
 
             with self._no_grad():
                 cs_out = self.recommender.pick_cs_model(bp_t, ctx_t, cand_t, mask_t,
@@ -155,40 +169,48 @@ class FallbackManager:
             if self._check_logit_collapse(cs_logits):
                 return self._rule_based_pick(bp_context, reason="logit_collapse")
 
-            # 5. 走级联树模型
-            valid_cids = np.where(mask_np > 0.5)[0]
+            # 5. 走级联树模型 (截断 Top 50，与 predict_ban / BPRecommender.predict_pick 一致)
+            valid_cids = np.where(_mask_np > 0.5)[0]
             valid_cids = valid_cids[valid_cids >= cs]
             total_valid = len(valid_cids)
 
-            cs_gf = self.recommender._compute_group_features(cs_logits, mask_np, cs, self.store.vocab_size)
-            nocs_gf = self.recommender._compute_group_features(nocs_logits, mask_np, cs, self.store.vocab_size)
+            top_k_limit = min(50, total_valid)
+            cs_valid_logits = cs_logits[valid_cids]
+            top_k_local_indices = np.argsort(-cs_valid_logits)[:top_k_limit]
+            eval_cids = valid_cids[top_k_local_indices]
+            total_eval = len(eval_cids)
+
+            cs_gf = self.recommender._compute_group_features(cs_logits, _mask_np, cs, _ve)
+            nocs_gf = self.recommender._compute_group_features(nocs_logits, _mask_np, cs, _ve)
 
             X_arr = _build_feature_matrix_batch(
-                cs_logits[valid_cids], cs_gf["rank_map"][valid_cids], cs_gf,
-                nocs_logits[valid_cids], nocs_gf["rank_map"][valid_cids], nocs_gf,
-                cand_np[valid_cids], total_valid, total_valid, target_step,
+                cs_logits[eval_cids], cs_gf["rank_map"][eval_cids], cs_gf,
+                nocs_logits[eval_cids], nocs_gf["rank_map"][eval_cids], nocs_gf,
+                _cand_np[eval_cids], total_valid, total_eval, target_step,
             )
 
-            lgb_preds = np.zeros(total_valid, dtype=np.float64)
+            lgb_preds = np.zeros(total_eval, dtype=np.float64)
             X_scaled = self.recommender.scaler.transform(X_arr)
             for m in self.recommender.lgb_models:
                 lgb_preds += m.predict(X_scaled)
             lgb_preds /= max(len(self.recommender.lgb_models), 1)
 
-            # 【修复 3】：支持残差训练模式
             if getattr(self.recommender, "pick_fusion_mode", "blend") == "residual_init_score":
-                final_scores = lgb_preds + cs_logits[valid_cids]
+                final_scores = lgb_preds + cs_logits[eval_cids]
             else:
-                cs_rn = self.recommender._rank_normalize(cs_logits[valid_cids])
+                cs_rn = self.recommender._rank_normalize(cs_logits[eval_cids])
                 lgb_rn = self.recommender._rank_normalize(lgb_preds)
                 final_scores = self.recommender.pick_blend_alpha * cs_rn + (1.0 - self.recommender.pick_blend_alpha) * lgb_rn
 
             sorted_idx = np.argsort(-final_scores)
             results = []
-            # 返回 Top 50，前端在 'all' 下显示 Top 20，位置过滤时从 Top 50 中筛选
             for rank, si in enumerate(sorted_idx[:50]):
-                cid = valid_cids[si]
+                cid = eval_cids[si]
                 results.append((cid, float(final_scores[si]), rank + 1))
+
+            # === Legacy v1 兼容: 翻译输出回 v2 idx ===
+            if getattr(recommender, 'legacy_mode', False):
+                results = recommender._translate_results_from_legacy(results)
 
             self._normal_count += 1
             return results
@@ -235,21 +257,37 @@ class FallbackManager:
 
         # 3. 走深度网络推理
         try:
-            cs = self.store.champion_start_idx
-            bp_padded = bp_seq_ids + [self.store.PAD_IDX] * (20 - len(bp_seq_ids))
-            bp_t = self._to_tensor([bp_padded], dtype="long")
+            # === Legacy v1 兼容: 翻译输入到 legacy idx ===
+            recommender = self.recommender
+            if getattr(recommender, 'legacy_mode', False):
+                _bp_seq = recommender._translate_bp_seq_to_legacy(bp_seq_ids)
+                _cand_np, _mask_np = recommender._translate_cand_to_legacy(cand_np, mask_np)
+                _cs = 3  # legacy v1 champion_start_idx
+                _ve = recommender.legacy_vocab_size
+            else:
+                _bp_seq = bp_seq_ids
+                _cand_np = cand_np
+                _mask_np = mask_np
+                _cs = self.store.champion_start_idx
+                _ve = self.store.vocab_size
+
+            cs = _cs
+            bp_padded = _bp_seq + [self.store.PAD_IDX] * (20 - len(_bp_seq))
+            bp_t = self._to_tensor(np.array([bp_padded], dtype=np.int64), dtype="long")
             ctx_t = self._to_tensor(np.array([global_context], dtype=np.float32))
-            cand_t = self._to_tensor(np.array([cand_np], dtype=np.float32))
-            mask_t = self._to_tensor(np.array([mask_np], dtype=np.float32))
+            cand_t = self._to_tensor(np.array([_cand_np], dtype=np.float32))
+            mask_t = self._to_tensor(np.array([_mask_np], dtype=np.float32))
 
             hist_pos = np.full(20, -1, dtype=np.int64)
-            for i in range(min(len(bp_seq_ids), 20)):
-                cid = bp_seq_ids[i]
+            for i in range(min(len(_bp_seq), 20)):
+                cid = _bp_seq[i]
                 if cid >= cs:
                     from bp_recommendation.feature_pipeline import BP_SEQUENCE
                     if i < len(BP_SEQUENCE) and BP_SEQUENCE[i][0] == "pick":
-                        hist_pos[i] = int(np.argmax(self.store.pos_prior[cid]))
-            hist_t = self._to_tensor([hist_pos], dtype="long")
+                        # Legacy 模式下 pos_prior 是 v2 形状, cid 是 legacy idx, 跳过
+                        if not getattr(recommender, 'legacy_mode', False) and cid < self.store.pos_prior.shape[0]:
+                            hist_pos[i] = int(np.argmax(self.store.pos_prior[cid]))
+            hist_t = self._to_tensor(np.array([hist_pos], dtype=np.int64), dtype="long")
 
             with self._no_grad():
                 ban_out = self.recommender.ban_model(bp_t, ctx_t, cand_t, mask_t, history_positions=hist_t)
@@ -260,22 +298,22 @@ class FallbackManager:
                 return self._rule_based_ban(bp_context, reason="logit_collapse")
 
             # 5. 走级联树模型 (安全修复版：必须截断 Top 50 防止外推幻觉)
-            valid_cids = np.where(mask_np > 0.5)[0]
+            valid_cids = np.where(_mask_np > 0.5)[0]
             valid_cids = valid_cids[valid_cids >= cs]
-            
+
             # 【截断 Top 50 逻辑】
             top_k_limit = min(50, len(valid_cids))
             cs_valid_logits = cs_logits[valid_cids]
             top_k_local_indices = np.argsort(-cs_valid_logits)[:top_k_limit]
-            
+
             eval_cids = valid_cids[top_k_local_indices]
             total_eval = len(eval_cids)
 
-            cs_gf = _compute_ban_group_features(cs_logits, mask_np, cs, self.store.vocab_size)
+            cs_gf = _compute_ban_group_features(cs_logits, _mask_np, cs, _ve)
 
             X_arr = _build_ban_feature_matrix_batch(
                 cs_logits[eval_cids], cs_gf["rank_map"][eval_cids], cs_gf,
-                cand_np[eval_cids], total_eval,
+                _cand_np[eval_cids], total_eval,
             )
 
             lgb_preds = np.zeros(total_eval, dtype=np.float64)
@@ -294,6 +332,10 @@ class FallbackManager:
             for rank, si in enumerate(sorted_idx[:50]):
                 cid = eval_cids[si]
                 results.append((cid, float(final_scores[si]), rank + 1))
+
+            # === Legacy v1 兼容: 翻译输出回 v2 idx ===
+            if getattr(recommender, 'legacy_mode', False):
+                results = recommender._translate_results_from_legacy(results)
 
             self._normal_count += 1
             return results

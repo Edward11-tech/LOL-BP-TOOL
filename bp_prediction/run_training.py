@@ -436,6 +436,7 @@ def run_inference_test():
         # 测试预测
         request = {
             "league": "LCK", "is_playoff": False, "first_pick": "blue",
+            "game_num": 1,
             "blue_team": "Gen.G", "red_team": "T1",
             "blue_champions": {"top": "Ornn", "jungle": "Lee Sin", "mid": "Azir",
                                "bot": "Jinx", "support": "Nautilus"},

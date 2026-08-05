@@ -152,7 +152,8 @@ def evaluate(model, val_loader, device, mask_cs=False, use_amp=False):
     
     # 【加速】获取总样本数以进行预分配连续内存
     n_samples = len(val_loader.dataset)
-    vocab_size = getattr(model, 'vocab_size', 175)
+    vocab_size = getattr(model, 'vocab_size', 180)
+
     
     # 从第一个 batch 动态获取 cand_dim
     sample_batch = next(iter(val_loader))
@@ -342,7 +343,7 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, device, grad_clip
     }
 
 
-def save_checkpoint(model, optimizer, epoch, metrics, path, candidate_dim=None, context_dim=None):
+def save_checkpoint(model, optimizer, epoch, metrics, path, candidate_dim=None, context_dim=None, vocab_size=None, role_token_start=None, champion_start_idx=None):
     bare_model = get_bare_model(model)
     ckpt = {
         "epoch": epoch,
@@ -354,6 +355,12 @@ def save_checkpoint(model, optimizer, epoch, metrics, path, candidate_dim=None, 
         ckpt["candidate_dim"] = candidate_dim
     if context_dim is not None:
         ckpt["context_dim"] = context_dim
+    if vocab_size is not None:
+        ckpt["vocab_size"] = vocab_size
+    if role_token_start is not None:
+        ckpt["role_token_start"] = role_token_start
+    if champion_start_idx is not None:
+        ckpt["champion_start_idx"] = champion_start_idx
     torch.save(ckpt, path)
 
 def main(override_args=None):
@@ -505,6 +512,14 @@ def main(override_args=None):
 
     _, _, vocab_size, _, _ = load_champion_vocabulary(VOCAB_PATH)
 
+    # v3 方案: 从 vocab 文件读取 role_token_start 和 champion_start_idx
+    with open(VOCAB_PATH, "r", encoding="utf-8") as _f:
+        _vocab_meta = json.load(_f)
+    role_token_start = _vocab_meta.get("role_token_start", 2)
+    champion_start_idx = _vocab_meta.get("champion_start_idx", 7)
+    n_positions_vocab = _vocab_meta.get("n_positions", 5)
+    logger.info(f"  vocab_size={vocab_size}, role_token_start={role_token_start}, champion_start_idx={champion_start_idx}")
+
     sample_batch = next(iter(train_loader))
     context_dim_inferred = sample_batch["global_context"].shape[-1]
     candidate_dim_inferred = sample_batch["candidate_matrix"].shape[-1]
@@ -547,6 +562,37 @@ def main(override_args=None):
         dropout=args.dropout,
         attention_dropout=args.attention_dropout,
     ).to(device)
+
+    # =====================================================================
+    # [ALIGN CHECK] Token/Embedding 维度对齐验证 (Ban 模型)
+    # =====================================================================
+    bare_model = get_bare_model(model)
+    _emb_ban = bare_model.bert.embeddings.word_embeddings.weight
+    logger.info("=" * 70)
+    logger.info("  [ALIGN CHECK] Ban 模型 Token/Embedding 维度对齐验证")
+    logger.info("=" * 70)
+    logger.info(f"  vocab_size (模型)     = {bare_model.vocab_size}")
+    logger.info(f"  word_embeddings shape = {tuple(_emb_ban.shape)}")
+    logger.info(f"  champion_start_idx    = {champion_start_idx}")
+    _assert_ok = True
+    if bare_model.vocab_size != vocab_size:
+        logger.error(f"  [MISMATCH] model.vocab_size ({bare_model.vocab_size}) != vocab_size from file ({vocab_size})")
+        _assert_ok = False
+    if _emb_ban.shape[0] != bare_model.vocab_size:
+        logger.error(f"  [MISMATCH] embedding dim 0 ({_emb_ban.shape[0]}) != vocab_size ({bare_model.vocab_size})")
+        _assert_ok = False
+    if champion_start_idx != 7:
+        logger.error(f"  [MISMATCH] champion_start_idx should be 7 in v3, got {champion_start_idx}")
+        _assert_ok = False
+    if vocab_size != 180:
+        logger.warning(f"  [WARNING] vocab_size={vocab_size}, expected 180 for v3 scheme")
+    logger.info(f"  PAD=0, UNK=1, TOP/JNG/MID/BOT/SUP=2-6, champions=7..{vocab_size-1} ({vocab_size-champion_start_idx} heroes)")
+    if _assert_ok:
+        logger.info("  [ALIGN CHECK] ✓ Ban 模型所有维度对齐验证通过!")
+    else:
+        logger.critical("  [ALIGN CHECK] ✗ Ban 模型维度对齐失败! 训练已终止。")
+        raise RuntimeError("Ban model Token/Embedding alignment check FAILED.")
+    logger.info("=" * 70)
 
     # 【加速】Torch Compile 计算图编译
     if args.compile and device.type == "cuda":
@@ -648,7 +694,9 @@ def main(override_args=None):
                             versioned_ckpt = os.path.join(CKPT_DIR, f"best_model_{model_type_label.lower()}_ep{epoch}.pt")
                             canonical_ckpt = os.path.join(CKPT_DIR, f"best_model_{model_type_label.lower()}.pt")
                             save_checkpoint(model, optimizer, epoch, val_metrics, versioned_ckpt,
-                                            candidate_dim=candidate_dim_inferred, context_dim=context_dim_inferred)
+                                            candidate_dim=candidate_dim_inferred, context_dim=context_dim_inferred,
+                                            vocab_size=vocab_size, role_token_start=role_token_start,
+                                            champion_start_idx=champion_start_idx)
                             import shutil
                             shutil.copy2(versioned_ckpt, canonical_ckpt)
                             src_size = os.path.getsize(versioned_ckpt)
@@ -678,7 +726,9 @@ def main(override_args=None):
         if is_production:
             last_ckpt_path = os.path.join(CKPT_DIR, f"last_model_{model_type_label.lower()}.pt")
             save_checkpoint(model, optimizer, args.epochs, {}, last_ckpt_path,
-                            candidate_dim=candidate_dim_inferred, context_dim=context_dim_inferred)
+                            candidate_dim=candidate_dim_inferred, context_dim=context_dim_inferred,
+                            vocab_size=vocab_size, role_token_start=role_token_start,
+                            champion_start_idx=champion_start_idx)
             canonical_ckpt = os.path.join(CKPT_DIR, f"best_model_{model_type_label.lower()}.pt")
             import shutil
             shutil.copy2(last_ckpt_path, canonical_ckpt)
@@ -813,7 +863,8 @@ def main(override_args=None):
     logger.info("Extracting Train Dataloader logits using pre-allocated tensors...")
     
     n_train_samples = len(train_loader_export.dataset)
-    vocab_size = getattr(model, 'vocab_size', 175)
+    vocab_size = getattr(model, 'vocab_size', 180)
+
     
     # 从第一个 batch 动态获取 cand_dim
     sample_export = next(iter(train_loader_export))

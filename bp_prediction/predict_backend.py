@@ -2,7 +2,7 @@
 predict_backend.py — 胜率预测 & BP Delta 后端封装
 ===================================================
 为 Flask app 提供:
-  1. LCK 专属胜率预测 (基于 bp_prediction)
+  1. LPL/LCK/LEC 三联赛胜率预测 (基于 bp_prediction)
   2. LPL/LCK/LEC 三联赛 BP Delta 分析
 
 所有模型加载/推理逻辑统一使用 feature_builder.py, 确保与训练时一致。
@@ -37,7 +37,7 @@ from bp_prediction.feature_builder import (
     load_feature_cols, load_feature_stores, load_champion_tags, load_known_champions,
     resolve_team_name, get_team_roster,
     build_single_match_features, build_predraft_features, classify_features,
-    extract_tf_features_for_match,
+    extract_tf_features_for_match, resolve_match_info_date,
 )
 
 # 统一配置管理 (使用绝对导入避免与 bp_recommendation.config 冲突)
@@ -67,6 +67,7 @@ except ImportError:
 
 POS_CN = {"top": "上单", "jng": "打野", "mid": "中单", "bot": "ADC", "sup": "辅助"}
 POS_WEB = {"top": "top", "jng": "jungle", "mid": "mid", "bot": "bot", "sup": "support"}
+SUPPORTED_PREDICT_LEAGUES = frozenset({"LPL", "LCK", "LEC"})
 
 log = get_logger(__name__)
 
@@ -260,13 +261,20 @@ class PredictBackend:
     def get_champions(self):
         """返回英雄列表 (前端下拉用), 包含中文名和登场率（优先使用融合展示数据）"""
         vocab_path = os.path.join(BASE_DIR, "cleaned_data", "champion_vocabulary.json")
+        pos_path = os.path.join(BASE_DIR, "cleaned_data", "champion_position_mapping.json")
+        position_mapping = {}
+        if os.path.exists(pos_path):
+            with open(pos_path, "r", encoding="utf-8") as f:
+                position_mapping = json.load(f)
+
         result = []
         if os.path.exists(vocab_path):
             with open(vocab_path, "r") as f:
                 vocab = json.load(f)
+            cs = int(vocab.get("champion_start_idx", 7))
             if isinstance(vocab, dict) and "champions" in vocab:
                 for c in vocab["champions"]:
-                    if "name" not in c:
+                    if c.get("idx", 0) < cs or "name" not in c:
                         continue
                     item = {"name": c["name"]}
                     if "aliases" in c and "zh" in c["aliases"]:
@@ -283,6 +291,16 @@ class PredictBackend:
                             item["meta_presence"] = round(float(meta["meta_presence"]), 4)
                         if "meta_win_rate" in meta and meta["meta_win_rate"] is not None:
                             item["meta_win_rate"] = round(float(meta["meta_win_rate"]), 4)
+                    # 分路先验（供前端分路筛选）
+                    pos_probs = {}
+                    if c["name"] in position_mapping:
+                        for entry in position_mapping[c["name"]]:
+                            pos_name = entry.get("position", "")
+                            prob = float(entry.get("probability", 0) or 0)
+                            if prob > 0.05:
+                                pos_probs[pos_name] = round(prob, 3)
+                    if pos_probs:
+                        item["positions"] = pos_probs
                     result.append(item)
         if not result:
             result = [{"name": c} for c in sorted(self.known_champions)]
@@ -612,13 +630,15 @@ class PredictBackend:
           - 使用空英雄列表构建特征 (选手统计回退到默认值)
           - tf_features=None (不使用英雄组合 TF 特征)
         """
-        # 缓存键: 仅包含 pre-draft 相关字段
+        # 缓存键: pre-draft 相关字段（含局数与 PIT 日期）
         cache_key = (
             match_info.get("league", "LCK"),
             match_info.get("blue_team", ""),
             match_info.get("red_team", ""),
             match_info.get("is_playoff", False),
             match_info.get("is_blue_map_side", True),
+            int(match_info.get("game_num", 1)),
+            match_info.get("date", ""),
         )
 
         # 1. 检查缓存
@@ -657,6 +677,26 @@ class PredictBackend:
 
     # ---- 内部方法 ----
 
+    @staticmethod
+    def _normalize_league(league, default="LCK"):
+        value = (league or default).strip().upper()
+        if value not in SUPPORTED_PREDICT_LEAGUES:
+            raise ValueError(f"不支持的联赛: {league}，仅支持 LPL / LCK / LEC")
+        return value
+
+    def _parse_required_game_num(self, request):
+        """解析并校验系列赛局数 (1-5)，推理必填。"""
+        raw = request.get("game_num")
+        if raw is None:
+            raise ValueError("缺少必填字段: game_num (系列赛局数 1-5)")
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError("game_num 必须为 1-5 的整数")
+        if not (1 <= n <= 5):
+            raise ValueError("game_num 必须为 1-5 的整数")
+        return n
+
     def _build_match_info(self, request):
         """从前端请求构建 match_info (feature_builder 格式)
 
@@ -670,9 +710,10 @@ class PredictBackend:
             模型自己学会地图方差异，不涉及对换。
           - 模型输出 blue_prob 永远是 "首选方（BP 蓝方）胜率"，与用户查询语义一致，无需反转。
         """
-        league = request.get("league", "LCK")
+        league = self._normalize_league(request.get("league", "LCK"))
         is_playoff = request.get("is_playoff", False)
         first_pick = request.get("first_pick", "red")
+        game_num = self._parse_required_game_num(request)
         # is_blue_map_side = 首选方是否在地图蓝色方
         is_blue_map_side = 1 if first_pick == "blue" else 0
 
@@ -713,14 +754,16 @@ class PredictBackend:
             "is_playoff": is_playoff,
             # is_blue_map_side = 首选方是否在地图蓝色方（特征字段，非交换标志）
             "is_blue_map_side": is_blue_map_side,
-            "game_num": int(request.get("game_num", 1)),
+            "game_num": game_num,
             "blue_team": blue_team,
             "red_team": red_team,
             "blue_champions": blue_champions,
             "red_champions": red_champions,
-            "date": request.get("date", "2099-12-31"),
             "mode": "full" if (blue_team or red_team) else "draft",
         }
+        if request.get("date"):
+            match_info["date"] = request["date"]
+        resolve_match_info_date(match_info)
 
         # 添加选手信息
         for pos in POSITIONS:

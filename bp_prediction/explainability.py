@@ -39,8 +39,9 @@ def _load_counters():
         path = os.path.join(CLEANED_DIR, "champion_counters_cleaned.csv")
         if os.path.exists(path):
             _counters_df = pd.read_csv(path)
-            _counters_df["position"] = _counters_df["position"].str.lower().map(
-                lambda x: POS_MAP.get(x, x))
+            if "position" in _counters_df.columns:
+                _counters_df["position"] = _counters_df["position"].str.lower().map(
+                    lambda x: POS_MAP.get(x, x))
         else:
             _counters_df = pd.DataFrame()
             log.warning(f"Counter数据文件不存在: {path}")
@@ -54,8 +55,9 @@ def _load_synergy():
         path = os.path.join(CLEANED_DIR, "champion_synergy_cleaned.csv")
         if os.path.exists(path):
             _synergy_df = pd.read_csv(path)
-            _synergy_df["position"] = _synergy_df["position"].str.lower().map(
-                lambda x: POS_MAP.get(x, x))
+            if "position" in _synergy_df.columns:
+                _synergy_df["position"] = _synergy_df["position"].str.lower().map(
+                    lambda x: POS_MAP.get(x, x))
         else:
             _synergy_df = pd.DataFrame()
             log.warning(f"Synergy数据文件不存在: {path}")

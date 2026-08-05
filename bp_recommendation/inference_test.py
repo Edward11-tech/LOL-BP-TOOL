@@ -276,6 +276,7 @@ class FastOOTFeatureStore:
                     self.ctr_mat[c1, c2] = float(stats.get("win_rate", 0.5))
 
     def _map_champ(self, name):
+        # empty_ban 在训练侧已归并到 UNK（vocab v2 移除 EMPTY_BAN，统一回退到 UNK_IDX）
         if not name or name.lower() == "nan" or name == "<EMPTY_BAN>":
             return self.UNK_IDX
         return self.name_to_idx.get(name, self.UNK_IDX)

@@ -22,7 +22,7 @@ Pick 阶段 Transformer 模型定义
     from bp_recommendation.model_pick.model_pick import BPTacticalTransformerPick
     
     model = BPTacticalTransformerPick(
-        vocab_size=175,
+        vocab_size=180,
         context_dim=20,
         candidate_dim=33
     )
@@ -38,7 +38,7 @@ from transformers import DistilBertConfig, DistilBertModel
 class BPTacticalTransformerPick(nn.Module):
     def __init__(
         self,
-        vocab_size: int = 175,
+        vocab_size: int = 180,
         context_dim: int = 20,
         candidate_dim: int = 33,
         h_dim: int = 512,
@@ -55,6 +55,7 @@ class BPTacticalTransformerPick(nn.Module):
         pad_idx: int = 0,
         temperature: float = None,
         ban_sample_weight: float = 0.023,
+        role_token_start: int = 2,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -65,8 +66,9 @@ class BPTacticalTransformerPick(nn.Module):
         self.ban_sample_weight = ban_sample_weight
         self.temperature = temperature if temperature is not None else math.sqrt(query_dim)
 
-        self.role_token_start = vocab_size
-        self.extended_vocab_size = vocab_size + n_positions 
+        # role_token_start: 位置 token 的起始 idx (v3 方案固定为 2)
+        self.role_token_start = role_token_start
+        self.extended_vocab_size = max(vocab_size, self.role_token_start + n_positions)
 
         bert_config = DistilBertConfig(
             vocab_size=self.extended_vocab_size,

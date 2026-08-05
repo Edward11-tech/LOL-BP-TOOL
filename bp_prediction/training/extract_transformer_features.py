@@ -228,11 +228,14 @@ class PITNoCSTrainer:
 
     def _create_model(self, context_dim, candidate_dim):
         """创建 NoCS Transformer 模型。"""
-        _, _, vocab_size, _, _ = load_champion_vocabulary(VOCAB_PATH)
+        name_to_idx, idx_to_name, vocab_size, special_tokens, champion_start_idx = load_champion_vocabulary(VOCAB_PATH)
+        # role_token_start = champion_start_idx - n_positions (位置token在英雄之前)
+        role_token_start = champion_start_idx - NOCS_BEST_PARAMS["n_positions"]
         model = BPTacticalTransformerPick(
             vocab_size=vocab_size,
             context_dim=context_dim,
             candidate_dim=candidate_dim,
+            role_token_start=role_token_start,
             **NOCS_BEST_PARAMS,
         ).to(self.device)
         return model
@@ -486,6 +489,10 @@ class TransformerFeatureExtractor:
         n = len(context_df)
         vocab_size = self.model.vocab_size
         context_dim = self.model.context_mlp[0].in_features  # 15
+        # champion_start_idx = role_token_start + n_positions (v3 方案)
+        role_start = getattr(self.model, 'role_token_start', 2)
+        n_pos = getattr(self.model, 'n_positions', 5)
+        cs = role_start + n_pos
 
         # --- 1. BP 序列 (B, 20) ---
         bp_cols = [f"bp_step{i}_champion_id" for i in range(20)]
@@ -526,15 +533,21 @@ class TransformerFeatureExtractor:
         if "first_pick_map_side" in context_df.columns:
             global_context[:, 14] = context_df["first_pick_map_side"].fillna(1).values.astype(np.float32)
 
-        global_context = torch.as_tensor(global_context, dtype=torch.float32)
+        for i in range(1, 6):
+            col_name = f"is_game_{i}"
+            if col_name in context_df.columns:
+                global_context[:, 14 + i] = context_df[col_name].fillna(0).values.astype(np.float32)
+            elif i == 1:
+                global_context[:, 15] = 1.0
 
+        global_context = torch.as_tensor(global_context, dtype=torch.float32)
         # --- 3. Candidate Matrix (B, V, 31) - Dummy ---
         candidate_dim = self.model.candidate_mlp[0].in_features  # 31
         candidate_matrix = torch.zeros(n, vocab_size, candidate_dim, dtype=torch.float32)
 
         # --- 4. Available Mask (B, V) - Dummy ---
         available_mask = torch.ones(n, vocab_size, dtype=torch.float32)
-        available_mask[:, :5] = 0.0  # 特殊 token 不可选
+        available_mask[:, :cs] = 0.0  # 特殊 token + position token 不可选
 
         return {
             "bp_sequence": bp_sequence,
@@ -608,18 +621,20 @@ class TransformerFeatureExtractor:
                 # BP 步骤隐状态 (去掉 role tokens)
                 bp_hidden = hidden[:, :seq_len, :]  # (B, 20, h_dim)
 
-                # 蓝方步骤: 0,2,4,6,9,11,13,15,17,18 (10步)
-                blue_steps = [0, 2, 4, 6, 9, 11, 13, 15, 17, 18]
-                # 红方步骤: 1,3,5,7,8,10,12,14,16,19 (10步)
-                red_steps = [1, 3, 5, 7, 8, 10, 12, 14, 16, 19]
+                # 标准 20 步 BP 中仅 Pick 步骤 (训练与推理统一)
+                BLUE_PICK_STEPS = [6, 9, 10, 17, 18]
+                RED_PICK_STEPS = [7, 8, 11, 16, 19]
+                blue_steps = [s for s in BLUE_PICK_STEPS if s < seq_len]
+                red_steps = [s for s in RED_PICK_STEPS if s < seq_len]
 
-                # 限制到实际序列长度
-                blue_steps = [s for s in blue_steps if s < seq_len]
-                red_steps = [s for s in red_steps if s < seq_len]
+                seq_mask = (inputs["bp_sequence"] != self.model.pad_idx).float()
+                b_mask = seq_mask[:, blue_steps].unsqueeze(-1)
+                b_hidden = bp_hidden[:, blue_steps, :] * b_mask
+                blue_pooled = b_hidden.sum(dim=1) / b_mask.sum(dim=1).clamp(min=1e-9)
 
-                # 池化: 对蓝/红步骤的隐状态取平均
-                blue_pooled = bp_hidden[:, blue_steps, :].mean(dim=1)  # (B, h_dim)
-                red_pooled = bp_hidden[:, red_steps, :].mean(dim=1)    # (B, h_dim)
+                r_mask = seq_mask[:, red_steps].unsqueeze(-1)
+                r_hidden = bp_hidden[:, red_steps, :] * r_mask
+                red_pooled = r_hidden.sum(dim=1) / r_mask.sum(dim=1).clamp(min=1e-9)
 
                 # 投影到 query_dim
                 blue_latent = self.model.bert_proj(blue_pooled).detach()  # (B, query_dim)

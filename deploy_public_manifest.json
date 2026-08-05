@@ -1,0 +1,385 @@
+{
+  "version": "20260805_222502",
+  "created_at": "2026-08-05T22:25:02.048696",
+  "project_root": "/Users/siwentu/Desktop/LOL analysis",
+  "public_root": "/Users/siwentu/Desktop/LOL analysis/lol_public",
+  "total_files": 61,
+  "total_size_mb": 3.32,
+  "missing_source_files": [],
+  "files": [
+    {
+      "path": "auto_update_pipeline.py",
+      "size_bytes": 96325,
+      "md5": "7fd6726c936bb79f0fa2200f21c238cc",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/__init__.py",
+      "size_bytes": 965,
+      "md5": "e02caa1abbb6320d7f994e4c9bf0ffa9",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/bp_delta.py",
+      "size_bytes": 17718,
+      "md5": "1c5a6f6879d78614db09d4cb83157d43",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/check_feature_alignment.py",
+      "size_bytes": 4482,
+      "md5": "1585d9fd035349feb5e803f2e7fabb6e",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/check_prediction_alignment.py",
+      "size_bytes": 37498,
+      "md5": "8392bbdba5d3d41b257753ff376aad7e",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/config.py",
+      "size_bytes": 16036,
+      "md5": "7b0591acfaba6a5ddff9256620ecc6c2",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/explainability.py",
+      "size_bytes": 52628,
+      "md5": "fd4e9714aab13a911591119f421af381",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/export_production_transformer.py",
+      "size_bytes": 17907,
+      "md5": "28c652ef8b591c2b300f74e427cf4c3a",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/feature_builder.py",
+      "size_bytes": 41687,
+      "md5": "20394b4fb19263cbb8e825bd6711cc13",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/feature_monitor.py",
+      "size_bytes": 18559,
+      "md5": "28379594bcd7f6e108a4ce65a5287aa9",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/feature_pipeline.py",
+      "size_bytes": 62656,
+      "md5": "484cf37ad26dd485e72fdf1a4b1470a4",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/feature_utils.py",
+      "size_bytes": 9284,
+      "md5": "54b79a9a6b46b472e168a197c76cb3d1",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/predict_backend.py",
+      "size_bytes": 58235,
+      "md5": "9725067bc7001067897e3de4d225f610",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/predict_match.py",
+      "size_bytes": 19189,
+      "md5": "6589c4a9d2d0f1addcf6ea6e80a5985e",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/run_training.py",
+      "size_bytes": 27672,
+      "md5": "b9c06be9d28acbc7c84dc11019f602d4",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/train_production.py",
+      "size_bytes": 35427,
+      "md5": "c783753206254a4ed116a0598d1bd195",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/training/__init__.py",
+      "size_bytes": 256,
+      "md5": "9496d8b48c191ff13ac4f3560c6a2da7",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/training/extract_transformer_features.py",
+      "size_bytes": 37079,
+      "md5": "e05becb20d64de8a0492a9e4fa232ab4",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_prediction/training/train_walk_forward.py",
+      "size_bytes": 41685,
+      "md5": "423f578b6c169e0f5305f64a6770a6d8",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/__init__.py",
+      "size_bytes": 522,
+      "md5": "bdd0412024f492648e01644be144dcd5",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/bp_predict.py",
+      "size_bytes": 88103,
+      "md5": "d7a169e5f6bee504c5f0799543d94cef",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/bp_recommendation_backend.py",
+      "size_bytes": 39972,
+      "md5": "60fb9d3aa4ab81ce645a871038d4b0ec",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/config.py",
+      "size_bytes": 25970,
+      "md5": "f6d842275b738297c7203e2b41df476e",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/feature_monitor.py",
+      "size_bytes": 22653,
+      "md5": "04dcf95f5e069321c3ee4585f1d0a766",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/feature_pipeline.py",
+      "size_bytes": 77899,
+      "md5": "4032a57b168b394335bfd786432fda6f",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/inference_test.py",
+      "size_bytes": 60283,
+      "md5": "252932010010b1d3e665a069bf71507b",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/init_config.py",
+      "size_bytes": 5485,
+      "md5": "d5d55c4a6f149c891fd9f6a1cedb5d2c",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_ban/__init__.py",
+      "size_bytes": 459,
+      "md5": "af99cf7cdd31a4962788d9d0ad02f456",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_ban/cascade_ban.py",
+      "size_bytes": 24967,
+      "md5": "fe98a70a06717f4002349fe91beeebcb",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_ban/cascade_ban_search.py",
+      "size_bytes": 11256,
+      "md5": "f9ae622bd4fecf8a01d3035738ca8862",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_ban/dataloader_ban.py",
+      "size_bytes": 30366,
+      "md5": "83d5dc1161fbbaf6f574587d5e604a19",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_ban/model_ban.py",
+      "size_bytes": 8472,
+      "md5": "e0f2acd13828c92992a593b8f1a2316a",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_ban/train_ban.py",
+      "size_bytes": 43736,
+      "md5": "22ae8839c5890ed8dc6cd116b6e5e0b1",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_ban/transformer_ban_search.py",
+      "size_bytes": 18990,
+      "md5": "903d443012d9b424c05472afdde75e98",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_pick/__init__.py",
+      "size_bytes": 503,
+      "md5": "ae9ba288e093cd2612981a305613c609",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_pick/cascade_pick.py",
+      "size_bytes": 27553,
+      "md5": "f76659d8b49befe678c3f1da919bf559",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_pick/cascade_pick_experiment.py",
+      "size_bytes": 16615,
+      "md5": "ccf88f96983a06dc77ea7a794c23fb51",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_pick/cascade_pick_experiment_v2.py",
+      "size_bytes": 22385,
+      "md5": "6b5c9acbfa72552b46d0378052fd23bd",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_pick/cascade_pick_search.py",
+      "size_bytes": 11285,
+      "md5": "11d3ff8a765b4c16e893c38460bceee2",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_pick/dataloader_pick.py",
+      "size_bytes": 30483,
+      "md5": "17a268519ed9f6754e5c03198be870ce",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_pick/model_pick.py",
+      "size_bytes": 11763,
+      "md5": "b04cc3e659c5a381dc19a9446f7bb5fe",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_pick/train_pick.py",
+      "size_bytes": 46938,
+      "md5": "46d67df4f528caaa22f21f42e28d3ade",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/model_pick/transformer_pick_search.py",
+      "size_bytes": 30696,
+      "md5": "16d313a8ca6cfec4b3abc1a6f1a4bb23",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/run_pipeline.py",
+      "size_bytes": 19646,
+      "md5": "42c7281fa3e1ef291f7501bd40fe33a4",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/verify_features_alignment.py",
+      "size_bytes": 13874,
+      "md5": "b9a4e8df4a90cedbd98e2ddb19a5ee0c",
+      "exists_at_source": true
+    },
+    {
+      "path": "bp_recommendation/verify_predictions.py",
+      "size_bytes": 25479,
+      "md5": "e59e4c4d4bed983713f4e10f098685df",
+      "exists_at_source": true
+    },
+    {
+      "path": "build_feature_baselines.py",
+      "size_bytes": 8111,
+      "md5": "cd11891405fc8697e9178e200fabe1f6",
+      "exists_at_source": true
+    },
+    {
+      "path": "common/__init__.py",
+      "size_bytes": 129,
+      "md5": "b45d6bb3a32899c0176acc1087564001",
+      "exists_at_source": true
+    },
+    {
+      "path": "common/inference_feature_logger.py",
+      "size_bytes": 6493,
+      "md5": "b44fd71c8abcd63e2f48d3daa8057baf",
+      "exists_at_source": true
+    },
+    {
+      "path": "common/paths.py",
+      "size_bytes": 13036,
+      "md5": "c3eb7175144fa8222cd36210ab080a49",
+      "exists_at_source": true
+    },
+    {
+      "path": "common/psi.py",
+      "size_bytes": 6592,
+      "md5": "1cb368df1779ee9f2404cc14ff6370d5",
+      "exists_at_source": true
+    },
+    {
+      "path": "data_checks.py",
+      "size_bytes": 10715,
+      "md5": "b7e98ff2b5e9c38fec94fc0ed025c8e1",
+      "exists_at_source": true
+    },
+    {
+      "path": "exploratory data analysis/LPL_2026_split2_analysis.ipynb",
+      "size_bytes": 2040137,
+      "md5": "73b41328196dded01df5e2dcba6722b7",
+      "exists_at_source": true
+    },
+    {
+      "path": "fallback/__init__.py",
+      "size_bytes": 726,
+      "md5": "03434baaa77ad381c49f24aa11cba11c",
+      "exists_at_source": true
+    },
+    {
+      "path": "fallback/data_pipeline.py",
+      "size_bytes": 5256,
+      "md5": "11f21dae60a5bfb3ce279f76f8082ee6",
+      "exists_at_source": true
+    },
+    {
+      "path": "fallback/fallback_manager.py",
+      "size_bytes": 19703,
+      "md5": "d8432ff7ff0a13a815eb98f5aa062473",
+      "exists_at_source": true
+    },
+    {
+      "path": "fallback/rule_engine.py",
+      "size_bytes": 12502,
+      "md5": "1c06d85f31894dbe4a4942205f249758",
+      "exists_at_source": true
+    },
+    {
+      "path": "fallback/triggers.py",
+      "size_bytes": 13409,
+      "md5": "3101b68fac90c7314f8c6477340b62b2",
+      "exists_at_source": true
+    },
+    {
+      "path": "logger_config.py",
+      "size_bytes": 16889,
+      "md5": "cce0a68eb283ea9b91a487bb3f7e3b82",
+      "exists_at_source": true
+    },
+    {
+      "path": "monitoring/setup_psi_cron.sh",
+      "size_bytes": 5349,
+      "md5": "3b3eb520aa29d788b7c20f111495b682",
+      "exists_at_source": true
+    },
+    {
+      "path": "monitoring/weekly_psi_check.py",
+      "size_bytes": 10537,
+      "md5": "94b58cb6f36e11c19d58cdd2d381deb3",
+      "exists_at_source": true
+    }
+  ],
+  "sync_stats": {
+    "copied": 61,
+    "sanitized": 14,
+    "skipped_unchanged": 0,
+    "skipped_preserve": 0,
+    "missing_source": 0,
+    "errors": []
+  }
+}

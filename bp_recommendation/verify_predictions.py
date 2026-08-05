@@ -19,7 +19,7 @@
     - _parse_pre_unavail_list(): 解析前置局已用英雄
 
 使用方法:
-    cd /Users/siwentu/Desktop/LOL analysis
+    cd <project_root>
     python -m bp_recommendation.verify_predictions
     
     用于模型上线前的端到端验证，确保训练保存的模型与线上推理结果一致。

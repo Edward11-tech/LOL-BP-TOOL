@@ -29,7 +29,7 @@ Cascade Pick 融合模式与架构优化实验
       - 特征重要性分析
 
 用法:
-    cd /Users/siwentu/Desktop/LOL analysis
+    cd <project_root>
     conda run -n LOL python -m bp_recommendation.model_pick.cascade_pick_experiment_v2
 """
 
